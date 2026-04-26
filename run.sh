@@ -7,7 +7,7 @@
 #   bash ~/.openclaw/skills/gbrain/run.sh compare   → diff vs last snapshot
 #   bash ~/.openclaw/skills/gbrain/run.sh save      → full + save markdown to ~/brain/reports/
 
-set -e
+set +e   # tolerant — single failing layer should not abort whole report
 SUBCMD="${1:-check}"
 SKILL_DIR="$HOME/.openclaw/skills/gbrain"
 SNAP_DIR="$SKILL_DIR/snapshots"
@@ -104,11 +104,22 @@ except Exception as e:
 }
 
 run_check() {
-  echo "# 🧠 GBrain Canonical Dashboard"
-  echo "_Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC_"
+  echo '```'
+  echo '   ██████╗ ██████╗ ██████╗  █████╗ ██╗███╗   ██╗'
+  echo '  ██╔════╝ ██╔══██╗██╔══██╗██╔══██╗██║████╗  ██║'
+  echo '  ██║  ███╗██████╔╝██████╔╝███████║██║██╔██╗ ██║'
+  echo '  ██║   ██║██╔══██╗██╔══██╗██╔══██║██║██║╚██╗██║'
+  echo '  ╚██████╔╝██████╔╝██║  ██║██║  ██║██║██║ ╚████║'
+  echo '   ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝'
+  echo '              Canonical Health Dashboard v2'
+  echo '```'
   echo ""
-  echo "> **Hola Sergio 👋** — Este es tu panel de control de GBrain + OpenClaw."
-  echo "> Te explico cada sección abajo. Si algo está ⚠️ o ❌, te digo cómo arreglarlo."
+  echo "| 🕐 Generated | 🌐 Host | 👤 User |"
+  echo "|---|---|---|"
+  echo "| \`$(date -u +%Y-%m-%dT%H:%M:%SZ) UTC\` | \`$(hostname)\` | \`$USER\` |"
+  echo ""
+  echo "> 👋 **Hola Sergio** — panel de control de **GBrain** + **OpenClaw**, en 15 capas."
+  echo "> Cada capa explica qué mide, por qué importa, y qué hacer si está ⚠️ o ❌."
   echo ""
   echo "## 🎛️ Shortcuts disponibles (todos los subcomandos)"
   echo ""
@@ -155,6 +166,45 @@ except: print(0)" 2>/dev/null)
     echo "---"
     echo ""
   fi
+
+  # ─── TL;DR — resumen ejecutivo ───
+  HEALTH_SCORE=$(gbrain doctor --json 2>/dev/null | tail -1 | python3 -c "import json,sys;print(json.load(sys.stdin).get('health_score','?'))" 2>/dev/null)
+  PAGES_NOW=$(gbrain stats 2>/dev/null | grep -E "^Pages:" | awk '{print $2}')
+  if [ "$HEALTH_SCORE" -ge 90 ] 2>/dev/null; then SCORE_BADGE="🟢 $HEALTH_SCORE/100"; \
+  elif [ "$HEALTH_SCORE" -ge 70 ] 2>/dev/null; then SCORE_BADGE="🟡 $HEALTH_SCORE/100"; \
+  else SCORE_BADGE="🔴 $HEALTH_SCORE/100"; fi
+  echo "## 📋 TL;DR — resumen ejecutivo"
+  echo ""
+  echo "| 🩺 Health | 📚 Pages | ⚠️ Alertas | 🔴 Stuck/h | 🔑 API keys |"
+  echo "|---|---|---|---|---|"
+  echo "| $SCORE_BADGE | \`$PAGES_NOW\` | \`${#ALERTS[@]}\` | \`$STUCK\` | \`$KEYS\` |"
+  echo ""
+  echo "---"
+  echo ""
+
+  # ─── Tabla de contenido ───
+  echo "## 📚 Contenido"
+  echo ""
+  echo "| # | Capa | Qué mide |"
+  echo "|---|---|---|"
+  echo "| 1 | 📦 Versiones | GBrain + OpenClaw vs latest |"
+  echo "| 2 | 🏥 Runtime | Gateway, Telegram, modelo, fallbacks |"
+  echo "| 3 | 🔬 Doctor | gbrain doctor structured |"
+  echo "| 4 | 📊 Stats | pages/chunks/links/timeline |"
+  echo "| 5 | 🎯 Skills | skills cargadas en OpenClaw |"
+  echo "| 6 | 📈 Captura 24h | efectividad de signal-detector |"
+  echo "| 7 | 🐛 Bugs upstream | matchea tu versión vs known bugs |"
+  echo "| 8 | 📰 News | releases/PRs/issues con fecha |"
+  echo "| 9 | 📸 Snapshot diff | regresiones desde última corrida |"
+  echo "| 10 | 📜 Archivos canónicos | mtime de SOUL/MEMORY/openclaw.json |"
+  echo "| 11 | 🔌 MCP Health | servidores MCP y binarios |"
+  echo "| 12 | ⏱️ Stuck sessions | sesiones colgadas última hora |"
+  echo "| 13 | 🔑 Process env | API keys en openclaw-node |"
+  echo "| 14 | ⏰ Cron failures | jobs fallando en 24h |"
+  echo "| 15 | 🚀 Upstream changelog | commits + cross-ref con warnings |"
+  echo ""
+  echo "---"
+  echo ""
 
   # ─── Layer 1: Versiones ───
   echo "## 📦 Layer 1 — Versiones (release tracking)"
@@ -533,36 +583,133 @@ except Exception as e: print(f'(error: {e})')
 " 2>/dev/null
   echo ""
 
-  # ─── Verdict ───
-  echo "## 🎯 Verdict"
+  # ─── Drift notification (NEW v2: silent push if NEW alert CATEGORY appears) ───
+  # Compare by category (first 25 chars + emoji), not exact text — avoids spam from numeric drift (queue=315 → 317)
+  ALERT_STATE_FILE="$SKILL_DIR/.last-alerts.txt"
+  CURRENT_KEYS=$(printf '%s\n' "${ALERTS[@]}" | cut -c1-30 | sort -u)
+  PREV_KEYS=$(cat "$ALERT_STATE_FILE" 2>/dev/null | cut -c1-30 | sort -u)
+  NEW_CATEGORIES=$(comm -13 <(echo "$PREV_KEYS") <(echo "$CURRENT_KEYS"))
+  if [ -n "$NEW_CATEGORIES" ] && [ "$NEW_CATEGORIES" != "" ]; then
+    # Find full text of NEW alerts (match by prefix)
+    NEW_FULL=""
+    while IFS= read -r key; do
+      [ -z "$key" ] && continue
+      match=$(printf '%s\n' "${ALERTS[@]}" | grep -F "$key" | head -1)
+      [ -n "$match" ] && NEW_FULL="${NEW_FULL}- ${match}"$'\n'
+    done <<< "$NEW_CATEGORIES"
+    if [ -n "$NEW_FULL" ]; then
+      BOT_TOKEN=$(python3 -c "import json;d=json.load(open('$HOME/.openclaw/openclaw.json'));print(d['channels']['telegram']['botToken'])" 2>/dev/null)
+      if [ -n "$BOT_TOKEN" ]; then
+        MSG=$(printf '%s' "🧠 GBrain drift detected — nueva alerta:
+
+$NEW_FULL
+Run /gbrain en Telegram para detalle.")
+        curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+          --data-urlencode "chat_id=1439730479" \
+          --data-urlencode "text=$MSG" \
+          --data-urlencode "disable_notification=true" >/dev/null 2>&1 && \
+          echo "_📱 Telegram drift alert sent (silent)._" || true
+      fi
+    fi
+  fi
+  printf '%s\n' "${ALERTS[@]}" > "$ALERT_STATE_FILE"
+
+  # ─── Verdict + Quick actions ───
+  echo "## 🎯 Veredicto + acciones"
   echo ""
-  echo "Si todo es ✅ → GBrain canónico al 100%."
-  echo "Si hay ⚠️/❌ → corre \`bash ~/.openclaw/skills/gbrain/run.sh fix\` para auto-fix de issues seguros."
-  echo "Bugs upstream → reportar en https://github.com/garrytan/gbrain/issues"
+  if [ "${#ALERTS[@]}" -eq 0 ] 2>/dev/null && [ "$HEALTH_SCORE" -ge 90 ] 2>/dev/null; then
+    VERDICT="🟢 **CANONICAL** — todo verde, no hay nada urgente"
+  elif [ "${#ALERTS[@]}" -gt 0 ] 2>/dev/null; then
+    VERDICT="🔴 **NEEDS ATTENTION** — ${#ALERTS[@]} alerta(s) crítica(s) — corre \`/gbrain fix\`"
+  else
+    VERDICT="🟡 **OK con warnings** — health $HEALTH_SCORE/100, revisa Layer 3"
+  fi
+  echo "$VERDICT"
+  echo ""
+  echo "| Próxima acción | Comando |"
+  echo "|---|---|"
+  echo "| Auto-fix issues seguros + cleanup stuck | \`/gbrain fix\` |"
+  echo "| Ver solo upstream news | \`/gbrain news\` |"
+  echo "| Comparar vs snapshot anterior | \`/gbrain compare\` |"
+  echo "| Guardar este reporte como \`.md\` | \`/gbrain save\` |"
+  echo "| Reportar bug upstream | https://github.com/garrytan/gbrain/issues |"
+  echo "| Ver/contribuir al skill | https://github.com/durang/gbrain-skill |"
+  echo ""
+  echo "---"
+  echo "_Run with \`bash ~/.openclaw/skills/gbrain/run.sh <subcommand>\` or \`/gbrain <subcommand>\` in Claude Code/Telegram._"
 }
 
 run_fix() {
-  echo "# 🔧 /gbrain fix — Auto-fix issues seguros"
-  echo "_Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC_"
+  echo "# 🔧 GBrain Auto-Fix"
+  echo ""
+  echo "| 🕐 Run | 📂 Subcommand |"
+  echo "|---|---|"
+  echo "| \`$(date -u +%Y-%m-%dT%H:%M:%SZ) UTC\` | \`/gbrain fix\` |"
   echo ""
   cd ~/gbrain && set -a && source .env && set +a
-  echo "## 1. Embeddings stale"
+
+  echo "## 🧹 1. Stuck-session cleanup (NEW v2)"
+  echo ""
+  STUCK_BEFORE=$(count_stuck_sessions_last_hour)
+  echo "_Stuck sessions detectadas hace 1h:_ \`$STUCK_BEFORE\`"
+  echo ""
+  if [ "$STUCK_BEFORE" -gt 0 ] 2>/dev/null; then
+    echo "Ejecutando \`openclaw sessions cleanup --enforce --all-agents\`..."
+    openclaw sessions cleanup --enforce --all-agents 2>&1 | tail -5 | sed 's/^/    /'
+    echo ""
+    sleep 2
+    STUCK_AFTER=$(count_stuck_sessions_last_hour)
+    echo "_Stuck sessions después del cleanup:_ \`$STUCK_AFTER\`"
+  else
+    echo "✅ No hay sesiones colgadas — nada que limpiar."
+  fi
+  echo ""
+
+  echo "## 🎯 2. Embeddings stale"
+  echo ""
+  echo '```'
   gbrain embed --stale 2>&1 | tail -2
+  echo '```'
   echo ""
-  echo "## 2. Extract links"
+
+  echo "## 🔗 3. Extract links"
+  echo ""
+  echo '```'
   gbrain extract links --source db 2>&1 | tail -2
+  echo '```'
   echo ""
-  echo "## 3. Extract timeline"
+
+  echo "## ⏰ 4. Extract timeline"
+  echo ""
+  echo '```'
   gbrain extract timeline --source db 2>&1 | tail -2
+  echo '```'
   echo ""
-  echo "## 4. Integrity sweep (auto-fix bare-tweets, dead links)"
+
+  echo "## ✨ 5. Integrity sweep (bare-tweets, dead links)"
+  echo ""
+  echo '```'
   gbrain integrity auto 2>&1 | tail -3 || echo "(integrity auto no disponible o sin issues)"
+  echo '```'
   echo ""
-  echo "## 5. Apply pending migrations"
+
+  echo "## 🗃️ 6. Apply pending migrations"
+  echo ""
+  echo '```'
   gbrain apply-migrations --yes 2>&1 | tail -3
+  echo '```'
   echo ""
-  echo "## 6. Re-doctor"
-  gbrain doctor --json 2>&1 | tail -1 | python3 -c "import json,sys; d=json.load(sys.stdin); print(f'**Health score: {d[\"health_score\"]}/100**')"
+
+  echo "## 🩺 7. Re-doctor (health score after fix)"
+  echo ""
+  SCORE_AFTER=$(gbrain doctor --json 2>/dev/null | tail -1 | python3 -c "import json,sys; print(json.load(sys.stdin).get('health_score','?'))" 2>/dev/null)
+  if [ "$SCORE_AFTER" -ge 90 ] 2>/dev/null; then SB="🟢"; \
+  elif [ "$SCORE_AFTER" -ge 70 ] 2>/dev/null; then SB="🟡"; \
+  else SB="🔴"; fi
+  echo "**Health score post-fix:** $SB **$SCORE_AFTER / 100**"
+  echo ""
+  echo "---"
+  echo "_Run \`/gbrain check\` para ver el dashboard completo._"
 }
 
 run_news() {
@@ -595,16 +742,31 @@ for i in iss: print(f\"- #{i['number']} {i['title']}\")
 run_save() {
   REPORT_DIR="$HOME/brain/reports"
   mkdir -p "$REPORT_DIR"
-  # Single canonical file — overwrites every time. No accumulation.
-  REPORT_FILE="$REPORT_DIR/gbrain-latest.md"
+  # Daily file with date — accumulates history. Symlink "latest" always points to the most recent.
+  TODAY=$(date -u +%Y-%m-%d)
+  REPORT_FILE="$REPORT_DIR/gbrain-$TODAY.md"
+  LATEST_LINK="$REPORT_DIR/gbrain-latest.md"
   run_check > "$REPORT_FILE"
-  echo "📝 Reporte guardado (sobreescrito): $REPORT_FILE"
-  echo "Tamaño: $(wc -c < $REPORT_FILE) bytes"
-  echo "Última corrida: $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC"
+  rm -f "$LATEST_LINK"
+  ln -s "gbrain-$TODAY.md" "$LATEST_LINK"
+  HISTORY_COUNT=$(ls "$REPORT_DIR"/gbrain-*.md 2>/dev/null | grep -v latest | wc -l)
+  echo "# 💾 GBrain Report Saved"
   echo ""
-  echo "Para verlo: cat $REPORT_FILE"
-  echo "Para ver historial: los snapshots de stats (pages/links/etc.) se guardan en:"
-  echo "  ~/.openclaw/skills/gbrain/snapshots/"
+  echo "| 📂 File | 📏 Size | 🔗 Latest symlink | 📚 History |"
+  echo "|---|---|---|---|"
+  echo "| \`$REPORT_FILE\` | \`$(wc -c < $REPORT_FILE) bytes\` | \`$LATEST_LINK → gbrain-$TODAY.md\` | \`$HISTORY_COUNT días\` |"
+  echo ""
+  echo "**Generated at:** \`$(date -u +%Y-%m-%dT%H:%M:%SZ) UTC\`"
+  echo ""
+  echo "## 📖 Cómo verlo"
+  echo ""
+  echo '```bash'
+  echo "cat $LATEST_LINK              # último report"
+  echo "cat $REPORT_FILE              # report de hoy explícito"
+  echo "ls $REPORT_DIR/                       # ver historial completo"
+  echo '```'
+  echo ""
+  echo "_Snapshots de stats numéricas:_ \`~/.openclaw/skills/gbrain/snapshots/\`"
 }
 
 run_compare() {
