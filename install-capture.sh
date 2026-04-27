@@ -28,7 +28,7 @@ ok "Installed $SCRIPT_DST"
 # 2. Verify auth mode (subscription via claude CLI preferred, API key as fallback)
 echo "→ Checking auth mode..."
 if command -v claude >/dev/null 2>&1; then
-  ok "claude CLI found ($(command -v claude)) — capture will use your Pro/Max subscription ($0 extra)"
+  ok "claude CLI found ($(command -v claude)) — capture will use your Pro/Max subscription (no extra cost)"
 else
   ENV_FILE="${GBRAIN_ENV_FILE:-$HOME/gbrain/.env}"
   if [ -f "$ENV_FILE" ] && grep -q "^ANTHROPIC_API_KEY=" "$ENV_FILE"; then

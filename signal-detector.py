@@ -19,7 +19,7 @@ Wire-up: ~/.claude/settings.json hooks.Stop entry running:
 """
 
 from __future__ import annotations
-import json, os, sys, shutil, subprocess, urllib.request, urllib.error
+import json, os, sys, shutil, subprocess, time, urllib.request, urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -245,21 +245,48 @@ def main():
     env = load_env_file(ENV_FILE)
     api_key = os.environ.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_API_KEY")
 
+    t0 = time.monotonic()
     signals, auth_mode = call_extraction(transcript_txt, api_key)
+    extraction_secs = round(time.monotonic() - t0, 1)
     if signals.get("skip_reason"):
-        log(f"[skip:{session_id}] auth={auth_mode} reason={signals['skip_reason']}")
+        log(f"[skip:{session_id}] auth={auth_mode} reason={signals['skip_reason']} ({extraction_secs}s)")
         return 0
 
+    # Count what Haiku PROPOSED vs what ACTUALLY got written
+    proposed = {cat: len(signals.get(cat) or []) for cat in ("decisions","insights","entities","concepts")}
     counts = {"decisions":0, "insights":0, "entities":0, "concepts":0}
+    write_failures = 0
     for cat in ("decisions","insights","entities","concepts"):
         for item in (signals.get(cat) or []):
             slug = (item.get("slug") or "").strip()
             title = (item.get("title") or "").strip()
             body = (item.get("summary") or "").strip()
-            if slug and title and body and write_to_gbrain(slug, title, body, session_id):
+            if not (slug and title and body):
+                continue
+            if write_to_gbrain(slug, title, body, session_id):
                 counts[cat] += 1
+            else:
+                write_failures += 1
 
-    log(f"[ok:{session_id}] auth={auth_mode} captured: {counts['decisions']} decisions, {counts['insights']} insights, {counts['entities']} entities, {counts['concepts']} concepts (transcript {bytes_size}b)")
+    total_proposed = sum(proposed.values())
+    total_written = sum(counts.values())
+
+    # Distinguish: empty extraction (signals=0) vs operational (Haiku said skip) vs error
+    if total_proposed == 0:
+        log(f"[empty:{session_id}] auth={auth_mode} Haiku returned 0 signals ({extraction_secs}s, transcript {bytes_size}b) — likely operational session, or prompt needs tuning. Saved raw to last-extraction-raw.txt")
+        # Save the raw signals we got for debugging
+        try:
+            (HOME / ".gbrain/hooks/last-extraction-raw.txt").write_text(json.dumps(signals, indent=2)[:8000])
+        except Exception:
+            pass
+        return 0
+
+    extra = ""
+    if write_failures:
+        extra = f", {write_failures} write_failures"
+    if total_written < total_proposed:
+        extra += f", proposed={total_proposed}/written={total_written}"
+    log(f"[ok:{session_id}] auth={auth_mode} captured: {counts['decisions']} decisions, {counts['insights']} insights, {counts['entities']} entities, {counts['concepts']} concepts ({extraction_secs}s, transcript {bytes_size}b{extra})")
     return 0
 
 if __name__ == "__main__":
