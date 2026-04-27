@@ -23,12 +23,28 @@ hdr()   { echo ""; echo "${C_BOLD}── $* ──${C_RESET}"; }
 
 FIX=0
 VERBOSE=0
+TOP_PAGES=0
 for arg in "$@"; do
   case "$arg" in
     --fix) FIX=1 ;;
     --verbose|-v) VERBOSE=1 ;;
+    --top-pages|--top) TOP_PAGES=1 ;;
     --help|-h)
-      sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#//'
+      cat <<'HELP'
+capture-doctor.sh — health check + auto-repair for Claude Code GBrain capture
+
+USAGE:
+  capture-doctor.sh              # check only (read-only)
+  capture-doctor.sh --fix        # check + auto-repair recoverable issues
+  capture-doctor.sh --verbose    # extra detail per check
+  capture-doctor.sh --top-pages  # additionally export top-20 captured pages
+                                 # to ~/.gbrain/hooks/top-captures-YYYY-MM-DD.md
+
+EXIT CODES:
+  0 = all checks passed
+  1 = failures (re-run with --fix)
+  2 = critical (manual intervention)
+HELP
       exit 0 ;;
   esac
 done
@@ -332,7 +348,90 @@ else
   FAILURES=$((FAILURES + SEC_FAILURES))
 fi
 
-# ── Summary ───────────────────────────────────────
+# ── L10: Cost tracker (last 30 days) ─────────────
+hdr "L10 — Cost tracker (30-day estimate)"
+LOG="$HOME/.gbrain/hooks/signal-detector.log"
+if [ -f "$LOG" ]; then
+  AUTH_API=$(awk -v cutoff="$(date -u -d '30 days ago' +%FT%T 2>/dev/null || date -u -v-30d +%FT%T)" '$1 >= cutoff' "$LOG" 2>/dev/null | grep -c "auth=api")
+  AUTH_CLI=$(awk -v cutoff="$(date -u -d '30 days ago' +%FT%T 2>/dev/null || date -u -v-30d +%FT%T)" '$1 >= cutoff' "$LOG" 2>/dev/null | grep -c "auth=claude_cli")
+  COST_API_CENTS=$((AUTH_API * 16 / 10))   # 1.6¢ per session
+  ok "Last 30d: $AUTH_CLI subscription (free) + $AUTH_API API"
+  if [ "$AUTH_API" -gt 0 ]; then
+    printf "  ${C_DIM}API cost (Haiku 4.5 pricing): ~\$%d.%02d${C_RESET}\n" $((COST_API_CENTS / 100)) $((COST_API_CENTS % 100))
+  fi
+  if [ "$AUTH_CLI" -gt 0 ]; then
+    printf "  ${C_DIM}Subscription savings: ~\$%d.%02d (vs all-API baseline)${C_RESET}\n" $((AUTH_CLI * 16 / 1000)) $(((AUTH_CLI * 16 % 1000) / 10))
+  fi
+fi
+
+# ── L11: Capture quality score ───────────────────
+hdr "L11 — Capture quality (last 30 days)"
+if [ -f "$LOG" ]; then
+  TOTAL_30D=$(awk -v cutoff="$(date -u -d '30 days ago' +%FT%T 2>/dev/null || date -u -v-30d +%FT%T)" '$1 >= cutoff' "$LOG" 2>/dev/null | wc -l)
+  OK_30D=$(awk -v cutoff="$(date -u -d '30 days ago' +%FT%T 2>/dev/null || date -u -v-30d +%FT%T)" '$1 >= cutoff' "$LOG" 2>/dev/null | grep -c "\[ok:")
+  EMPTY_30D=$(awk -v cutoff="$(date -u -d '30 days ago' +%FT%T 2>/dev/null || date -u -v-30d +%FT%T)" '$1 >= cutoff' "$LOG" 2>/dev/null | grep -c "\[empty:")
+  SKIP_30D=$(awk -v cutoff="$(date -u -d '30 days ago' +%FT%T 2>/dev/null || date -u -v-30d +%FT%T)" '$1 >= cutoff' "$LOG" 2>/dev/null | grep -c "\[skip:")
+  if [ "$TOTAL_30D" -gt 0 ]; then
+    QUALITY=$((OK_30D * 100 / TOTAL_30D))
+    if [ "$QUALITY" -ge 80 ]; then
+      ok "Quality score: $QUALITY% ($OK_30D/$TOTAL_30D ok)"
+    elif [ "$QUALITY" -ge 50 ]; then
+      warn "Quality score: $QUALITY% ($OK_30D ok / $EMPTY_30D empty / $SKIP_30D skip)"
+      [ "$EMPTY_30D" -gt 5 ] && warn "  Many [empty] — consider tuning the prompt or switching to Sonnet"
+    else
+      err "Quality score: $QUALITY% — most sessions don't capture signals"
+      FAILURES=$((FAILURES+1))
+    fi
+  else
+    ok "No data yet (no sessions in last 30 days)"
+  fi
+fi
+
+# ── L12: Log size + rotation hint ────────────────
+hdr "L12 — Log file sizes"
+ROTATION_NEEDED=0
+for f in "$LOG" "$HOME/.gbrain/hooks/write-failures.log"; do
+  [ -f "$f" ] || continue
+  SIZE=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
+  if [ -z "$SIZE" ]; then continue; fi
+  SIZE_MB=$((SIZE / 1024 / 1024))
+  if [ "$SIZE_MB" -ge 10 ]; then
+    warn "$f is ${SIZE_MB}MB — recommend rotation"
+    ROTATION_NEEDED=$((ROTATION_NEEDED+1))
+    repair "rotate $(basename $f) (move current to .1, start fresh)" \
+      "mv '$f' '$f.1' && touch '$f' && chmod 600 '$f'"
+  else
+    [ "$VERBOSE" = "1" ] && ok "$f: ${SIZE} bytes (rotation not needed)"
+  fi
+done
+[ "$ROTATION_NEEDED" = "0" ] && ok "All logs under 10MB — no rotation needed"
+
+# ── L13: gbrain agent run availability (3rd auth fallback) ──
+hdr "L13 — gbrain agent run (optional 3rd auth fallback)"
+if command -v gbrain >/dev/null 2>&1 && gbrain --help 2>&1 | grep -q "agent run"; then
+  ok "gbrain agent run available — could be used as 3rd auth fallback if added to script"
+else
+  [ "$VERBOSE" = "1" ] && ok "gbrain agent run not available (older version) — skip"
+fi
+
+# ── Top pages export (opt-in via --top-pages) ────
+if [ "$TOP_PAGES" = "1" ] && command -v gbrain >/dev/null 2>&1; then
+  hdr "Bonus — Top captured pages export"
+  TOP_OUT="$HOME/.gbrain/hooks/top-captures-$(date +%F).md"
+  {
+    echo "# Top captured pages — $(date -u +%FT%TZ)"
+    echo ""
+    echo "Newest 20 pages from the shared brain (includes signal-detector captures)."
+    echo ""
+    gbrain list -n 20 2>/dev/null | grep -v "^\[gbrain\]" | head -20 | awk -F'\t' '{print "- **"$4"** — `"$1"` _"$2"_"}'
+    echo ""
+    echo "_Generated by capture-doctor.sh --top-pages_"
+  } > "$TOP_OUT"
+  chmod 600 "$TOP_OUT"
+  ok "Wrote $TOP_OUT"
+  [ "$VERBOSE" = "1" ] && head -25 "$TOP_OUT"
+fi
+
 echo ""
 echo "════════════════════════════════════════════════════════"
 if [ "$FAILURES" = "0" ] && [ "$CRITICAL" = "0" ]; then
