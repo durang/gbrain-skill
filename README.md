@@ -114,6 +114,26 @@ bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/c
 bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/capture-doctor.sh) --fix   # repair
 ```
 
+## Progression tracker
+
+`progression.sh` is a stateful walkthrough of the full multi-client setup. Auto-detects which phases you have done, which are pending, and tells you exactly what to do next. Every claim is evidence-based (filesystem + config inspection — no remembered state):
+
+```bash
+# Status overview + next action (markdown)
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/progression.sh)
+
+# Just the next pending action, terse
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/progression.sh) --next
+
+# Save report into your shared brain (queryable from any machine)
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/progression.sh) --save
+
+# Detail for one specific phase
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/progression.sh) --phase 5A
+```
+
+Tracks 9 phases (Phase 0 install → Phase 4D upstream contribution). Reinstall from scratch and the same script walks you back through every step in order.
+
 ## License
 
 MIT.
