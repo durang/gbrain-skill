@@ -230,6 +230,108 @@ if command -v gbrain >/dev/null 2>&1 && [ -f "$CFG" ]; then
   fi
 fi
 
+# ── L9: Security audit ─────────────────────────────
+hdr "L9 — Security audit"
+SEC_FAILURES=0
+
+# 9.1 — File perms 0600 on sensitive files
+for f in "$CFG" "$HOME/gbrain/.env" \
+         "$HOME/.gbrain/hooks/signal-detector.log" \
+         "$HOME/.gbrain/hooks/write-failures.log" \
+         "$HOME/.gbrain/hooks/last-extraction-raw.txt"; do
+  [ -f "$f" ] || continue
+  PERMS=$(stat -c%a "$f" 2>/dev/null || stat -f%A "$f" 2>/dev/null)
+  if [ "$PERMS" = "600" ] || [ "$PERMS" = "400" ]; then
+    [ "$VERBOSE" = "1" ] && ok "0$PERMS  $f"
+  else
+    err "Permisos 0$PERMS en $f (debe ser 0600 o 0400)"
+    SEC_FAILURES=$((SEC_FAILURES+1))
+    repair "chmod 600 on $f" "chmod 600 '$f'"
+  fi
+done
+
+# 9.2 — Hooks dir not world-readable
+HOOKS_PERMS=$(stat -c%a "$HOME/.gbrain/hooks" 2>/dev/null || stat -f%A "$HOME/.gbrain/hooks" 2>/dev/null)
+if [ -n "$HOOKS_PERMS" ]; then
+  if [ "$HOOKS_PERMS" = "700" ] || [ "$HOOKS_PERMS" = "750" ]; then
+    [ "$VERBOSE" = "1" ] && ok "Dir perms 0$HOOKS_PERMS on ~/.gbrain/hooks"
+  else
+    warn "~/.gbrain/hooks dir has 0$HOOKS_PERMS (recommend 0700)"
+    SEC_FAILURES=$((SEC_FAILURES+1))
+    repair "chmod 700 on ~/.gbrain/hooks" "chmod 700 '$HOME/.gbrain/hooks'"
+  fi
+fi
+
+# 9.3 — No API key leaks in logs
+LEAK_PATTERN='sk-ant-[a-zA-Z0-9_-]{40,}'
+for f in "$HOME/.gbrain/hooks/signal-detector.log" \
+         "$HOME/.gbrain/hooks/write-failures.log" \
+         "$HOME/.gbrain/hooks/last-extraction-raw.txt"; do
+  [ -f "$f" ] || continue
+  if grep -qE "$LEAK_PATTERN" "$f" 2>/dev/null; then
+    err "API key leaked in $f — exposed!"
+    SEC_FAILURES=$((SEC_FAILURES+1))
+    CRITICAL=$((CRITICAL+1))
+    warn "  Run: chmod 600 '$f' && manually inspect+redact"
+  fi
+done
+
+# 9.4 — No DB password in logs
+DB_PW_PATTERN='postgresql://[^:]+:[^@]+@'
+for f in "$HOME/.gbrain/hooks/signal-detector.log" \
+         "$HOME/.gbrain/hooks/write-failures.log" \
+         "$HOME/.gbrain/hooks/last-extraction-raw.txt"; do
+  [ -f "$f" ] || continue
+  if grep -qE "$DB_PW_PATTERN" "$f" 2>/dev/null; then
+    err "Postgres URL with credentials leaked in $f"
+    SEC_FAILURES=$((SEC_FAILURES+1))
+    CRITICAL=$((CRITICAL+1))
+  fi
+done
+
+# 9.5 — Env vars not exposed in process listing
+PROC_API_KEY=$(ps eww 2>/dev/null | grep "ANTHROPIC_API_KEY=sk-" | grep -v grep | head -1)
+if [ -n "$PROC_API_KEY" ]; then
+  warn "ANTHROPIC_API_KEY visible in some 'ps' output — consider env-file launchers"
+  [ "$VERBOSE" = "1" ] && echo "  ${C_DIM}(this is normal for openclaw-node + gbrain workers; only an issue on shared hosts)${C_RESET}"
+fi
+
+# 9.6 — Stop hook command path is absolute (no PATH-injection)
+HOOK_CMD=$(jq -r '.hooks.Stop[].hooks[] | select(.command | contains("signal-detector")) | .command' "$SETTINGS" 2>/dev/null | head -1)
+if [ -n "$HOOK_CMD" ]; then
+  if echo "$HOOK_CMD" | grep -qE 'python3 (/|\$HOME|\$\{HOME\})'; then
+    [ "$VERBOSE" = "1" ] && ok "Hook command uses absolute or \$HOME path (safe)"
+  else
+    warn "Hook command may be PATH-relative — recommend absolute path"
+    SEC_FAILURES=$((SEC_FAILURES+1))
+  fi
+fi
+
+# 9.7 — Backup file with secret in CFG bak
+BAK_LEAKS=$(ls "$HOME/.gbrain/"*.bak* 2>/dev/null | wc -l)
+if [ "$BAK_LEAKS" -gt 0 ]; then
+  warn "$BAK_LEAKS .bak file(s) in ~/.gbrain/ may contain secrets"
+  ls "$HOME/.gbrain/"*.bak* 2>/dev/null | head -3 | sed 's/^/    /'
+  SEC_FAILURES=$((SEC_FAILURES+1))
+  if [ "$VERBOSE" = "1" ]; then
+    warn "  Review and remove if obsolete: rm $HOME/.gbrain/*.bak*"
+  fi
+fi
+
+# 9.8 — Ensure recursion env var not stuck on
+if [ "${GBRAIN_HOOK_RUNNING:-0}" = "1" ]; then
+  warn "GBRAIN_HOOK_RUNNING=1 in current shell — captures will silently skip"
+  warn "  Run: unset GBRAIN_HOOK_RUNNING"
+  SEC_FAILURES=$((SEC_FAILURES+1))
+fi
+
+if [ "$SEC_FAILURES" = "0" ]; then
+  ok "Security audit: 8/8 checks passed"
+else
+  warn "Security audit: $SEC_FAILURES issue(s) — see above"
+  FAILURES=$((FAILURES + SEC_FAILURES))
+fi
+
 # ── Summary ───────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════════════════"
