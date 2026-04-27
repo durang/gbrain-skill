@@ -74,10 +74,19 @@ What is NOT captured:
 
 | Path | Purpose |
 |---|---|
-| `~/.gbrain/hooks/signal-detector.py` | The capture script (Python) |
-| `~/.gbrain/hooks/signal-detector.log` | One-line-per-run log: `[ok:<sid>] captured: N decisions, N insights, N entities, N concepts` |
-| `~/.gbrain/hooks/last-extraction-raw.txt` | Last raw response from Haiku — only written on parse failure (debugging aid) |
-| `~/.claude/settings.json` (`hooks.Stop`) | Wires the script as a Stop event hook |
+| `~/.gbrain/hooks/signal-detector.py` | The capture script (Python 3, stdlib only) |
+| `~/.gbrain/hooks/signal-detector.log` | One line per session: `[ok\|empty\|skip:<sid>] auth=<mode> captured: N/N/N/N (Xs, transcript Yb)` |
+| `~/.gbrain/hooks/write-failures.log` | One line per failed `gbrain put`: `timestamp\tslug=...\treason=...\tstderr=...` — diagnoses YAML errors, invalid slugs, CLI timeouts |
+| `~/.gbrain/hooks/last-extraction-raw.txt` | Last raw Haiku response — only written on parse failure (prompt-tuning aid) |
+| `~/.claude/settings.json` (`hooks.Stop`) | Wires the script as a Stop event hook with `async: true`, `timeout: 120` |
+
+## Log line types
+
+| Type | Meaning |
+|---|---|
+| `[ok:<sid>] auth=<mode> captured: A B C D (Xs, Yb)` | Real capture. A/B/C/D are decisions/insights/entities/concepts |
+| `[empty:<sid>] auth=<mode> Haiku returned 0 signals` | Haiku ran but returned all empty arrays. Either operational session or prompt needs tuning. Raw response saved |
+| `[skip:<sid>] auth=<mode> reason=<x>` | Pre-flight skip: no transcript, too small, no auth, parse error, etc. |
 
 ## Install
 
@@ -121,21 +130,31 @@ Or manually:
 ```
 Session ends
     ↓
-Claude Code fires Stop hook
+Claude Code fires Stop hook (async, never blocks user)
     ↓
 signal-detector.py spawns in background
+    ├─ recursion guard: if env GBRAIN_HOOK_RUNNING=1 → exit 0 (we're inside a child claude -p call)
     ├─ reads JSON event from stdin: { transcript_path, session_id }
-    ├─ falls back to newest *.jsonl in ~/.claude/projects/-home-<user>/ if path missing
+    ├─ falls back to newest *.jsonl in ~/.claude/projects/<sanitized-cwd>/ if path missing
     ├─ skips if transcript < 2KB
     ├─ extracts last 200 user/assistant turns to plain text
     ├─ truncates to 30k chars (cheap Haiku call)
-    ├─ calls Anthropic Haiku with system + extraction prompt
+    ├─ picks auth mode:
+    │    1. PREFERRED: claude -p --model claude-haiku-4-5 ...  (Pro/Max subscription, $0)
+    │    2. FALLBACK:  direct Anthropic API with ANTHROPIC_API_KEY  (~1-3¢)
+    │    3. NEITHER:   log [skip:no_auth] and exit 0
     ├─ robust JSON extraction (finds first balanced {...}, ignores prose/fences)
+    ├─ pre-validates slugs (kebab segments, lowercase, max 120 chars)
+    ├─ YAML-escapes title and session_id (prevents frontmatter parse errors on
+    │    Haiku-generated titles containing colons, hashes, quotes, etc.)
     ├─ for each signal: gbrain put <slug> with frontmatter (source_session, captured_at)
+    ├─ on write failure: log slug + reason + stderr to write-failures.log sidecar
     └─ writes one-line summary to ~/.gbrain/hooks/signal-detector.log
 ```
 
-Cost: ~1-3¢ per session at Haiku-4-5 prices for typical 30k-char transcripts.
+Cost: **$0/mo with Claude Pro/Max subscription** (uses `claude -p`). ~1-3¢ per session with `ANTHROPIC_API_KEY` fallback (Haiku 4.5 prices for typical 30k-char transcripts).
+
+Latency: 5-40s per session. Async, so the user never waits.
 
 ## Verify it's working
 
@@ -183,11 +202,13 @@ Open `~/.gbrain/hooks/signal-detector.py` and edit:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Log says `[skip:...] no ANTHROPIC_API_KEY` | Script can't find the key | Add `ANTHROPIC_API_KEY=sk-ant-...` to `~/gbrain/.env`, or export in shell |
-| Log says `[skip:...] no transcript found` | Wrong projects path | Edit `PROJECTS_DIR` in script to your actual `~/.claude/projects/<dir>/` |
-| Log says `[skip:...] no_json_object_found` | Haiku returned prose instead of JSON | The script saves the raw response to `last-extraction-raw.txt` — inspect, then strengthen the prompt or switch to Sonnet |
-| No log file appears | Hook didn't fire | Check `claude --debug` output, then run `/hooks` to reload settings, or restart Claude Code |
-| Pages not appearing in GBrain | `gbrain put` is failing silently | Run the script manually with a known-good transcript and check exit code |
+| Log says `[skip:...] reason=no_auth` | Neither `claude` CLI nor `ANTHROPIC_API_KEY` | Install Claude Code (`npm i -g @anthropic-ai/claude-code`) or set `ANTHROPIC_API_KEY` in `~/gbrain/.env` |
+| Log says `[skip:...] no transcript found` | Detection of `~/.claude/projects/<cwd>/` failed | Pass `transcript_path` explicitly in the JSON event, or set the `PROJECTS_DIR` env var |
+| Log says `[skip:...] no_json_object_found` | Haiku returned prose instead of JSON | Inspect `~/.gbrain/hooks/last-extraction-raw.txt`, strengthen the prompt or switch to Sonnet |
+| Log says `[ok:...] proposed=N/written=0` (writes silently failed) | All `gbrain put` calls returned non-zero | Inspect `~/.gbrain/hooks/write-failures.log`. Common causes are caught and logged: invalid slug shape (`slug_invalid_shape`), invalid characters in slug (`slug_invalid_chars`), YAML parse error in title/body (`exit_1` with stderr). v5 added YAML escaping which catches the most common case |
+| `[empty:<sid>]` on a real conversation | Haiku returned all empty arrays | Read `~/.gbrain/hooks/last-extraction-raw.txt`. The prompt may need tuning for your domain. |
+| No log file appears | Hook didn't fire | Open `/hooks` in Claude Code once (forces watcher reload), or restart Claude Code |
+| Recursive Stop hook firing on `claude -p` invocation | env var missing | The script sets `GBRAIN_HOOK_RUNNING=1` on the child env and bails on entry if it sees it. If you see this anyway, file an issue |
 
 ## Comparison with OpenClaw signal-detector
 
