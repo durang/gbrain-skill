@@ -97,6 +97,16 @@ See [CONNECT.md](CONNECT.md) for the verified compatibility matrix and step-by-s
 
 [ARCHITECTURE.md](ARCHITECTURE.md) is the end-to-end mental model — diagrams of the multi-machine brain, per-machine zoom (config / binary / serve / jobs / autopilot), full inventory of what is connected and why (and what is NOT and why), data-flow walkthrough of a write-on-laptop / read-on-server roundtrip, and a 6-step audit checklist to run on each node.
 
+## Ambient capture for Claude Code
+
+By default, Claude Code does NOT write to GBrain — the MCP wiring lets the model query/write when it chooses, but conversational sessions end without leaving a trail. [CAPTURE.md](CAPTURE.md) documents the Claude Code Stop hook that mirrors OpenClaw's `signal-detector` skill: at session end, a Python script runs in background, asks Haiku to extract decisions / original thinking / entities / concepts, and writes selective pages to GBrain. The full transcript is NOT saved (that would be noise) — only signals worth keeping.
+
+Install with one command:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/install-capture.sh)
+```
+
 ## License
 
 MIT.
