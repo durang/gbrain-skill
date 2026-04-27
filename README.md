@@ -107,6 +107,13 @@ Install with one command:
 bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/install-capture.sh)
 ```
 
+Health check + auto-repair:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/capture-doctor.sh)         # check
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/capture-doctor.sh) --fix   # repair
+```
+
 ## License
 
 MIT.

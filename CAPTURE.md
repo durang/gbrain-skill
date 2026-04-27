@@ -156,6 +156,43 @@ Cost: **$0/mo with Claude Pro/Max subscription** (uses `claude -p`). ~1-3¢ per 
 
 Latency: 5-40s per session. Async, so the user never waits.
 
+## Doctor — health check + auto-repair
+
+The skill ships a one-command doctor that audits the capture system end-to-end (L1-L8: gbrain CLI version, brain config, capture script syntax, Stop hook wiring, auth mode availability, recent log activity, recent write failures, brain reachability) and can auto-repair the most common breakages.
+
+```bash
+# Read-only check (safe, no changes)
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/capture-doctor.sh)
+
+# Auto-repair where possible (re-installs script, re-wires hook, etc.)
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/capture-doctor.sh) --fix
+
+# Verbose: extra detail per check
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/capture-doctor.sh) --verbose
+```
+
+Exit codes: `0` all checks passed, `1` failures (re-run with `--fix`), `2` critical failure (manual intervention).
+
+What it auto-repairs:
+
+| Symptom | Auto-fix |
+|---|---|
+| `gbrain` is the npm-squat `1.x.x` instead of Garry Tan's `0.2x.x` | `bun remove -g gbrain` + `bun install -g github:garrytan/gbrain` |
+| `signal-detector.py` missing or syntax-broken | Re-download from `master` |
+| Stop hook missing from `~/.claude/settings.json` | Re-run `install-capture.sh` |
+
+What it can't auto-repair (warns, points at the fix):
+
+- Missing `~/.gbrain/config.json` — needs a `database_url` from you
+- No `claude` CLI and no `ANTHROPIC_API_KEY` — pick one, install it
+- Brain unreachable — check Supabase / Postgres status separately
+
+Run it from cron daily for a passive watchdog:
+
+```cron
+0 9 * * *  bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/capture-doctor.sh) >> ~/.gbrain/hooks/doctor.log 2>&1
+```
+
 ## Verify it's working
 
 After a real session ends, check:
