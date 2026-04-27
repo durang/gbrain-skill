@@ -25,16 +25,22 @@ curl -fsSL "$RAW_URL" -o "$SCRIPT_DST"
 chmod 700 "$SCRIPT_DST"
 ok "Installed $SCRIPT_DST"
 
-# 2. Verify ANTHROPIC_API_KEY is reachable
-echo "→ Checking ANTHROPIC_API_KEY..."
-ENV_FILE="${GBRAIN_ENV_FILE:-$HOME/gbrain/.env}"
-if [ -f "$ENV_FILE" ] && grep -q "^ANTHROPIC_API_KEY=" "$ENV_FILE"; then
-  ok "Found in $ENV_FILE"
-elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-  ok "Found in shell env"
+# 2. Verify auth mode (subscription via claude CLI preferred, API key as fallback)
+echo "→ Checking auth mode..."
+if command -v claude >/dev/null 2>&1; then
+  ok "claude CLI found ($(command -v claude)) — capture will use your Pro/Max subscription ($0 extra)"
 else
-  warn "ANTHROPIC_API_KEY not found — capture will skip until you add it"
-  warn "Add to $ENV_FILE: ANTHROPIC_API_KEY=sk-ant-..."
+  ENV_FILE="${GBRAIN_ENV_FILE:-$HOME/gbrain/.env}"
+  if [ -f "$ENV_FILE" ] && grep -q "^ANTHROPIC_API_KEY=" "$ENV_FILE"; then
+    ok "ANTHROPIC_API_KEY found in $ENV_FILE — capture will use direct API (~1-3¢/session)"
+  elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    ok "ANTHROPIC_API_KEY found in shell env — capture will use direct API (~1-3¢/session)"
+  else
+    warn "Neither claude CLI nor ANTHROPIC_API_KEY found"
+    warn "Capture will skip until one is available. Either:"
+    warn "  - Install Claude Code:  npm i -g @anthropic-ai/claude-code"
+    warn "  - Or add to $ENV_FILE:  ANTHROPIC_API_KEY=sk-ant-..."
+  fi
 fi
 
 # 3. Wire Stop hook into ~/.claude/settings.json

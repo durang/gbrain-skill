@@ -90,7 +90,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/i
 Or manually:
 
 1. Place `signal-detector.py` at `~/.gbrain/hooks/signal-detector.py`, chmod 700.
-2. Ensure `ANTHROPIC_API_KEY` is set in `~/gbrain/.env` (the script reads it from there). The script does NOT need a separate API key — it reuses the one you already use for `gbrain agent run`.
+2. **Auth mode** — the script picks one automatically:
+   - **Preferred:** if the `claude` CLI is installed (you already have it via Claude Code), the script invokes `claude -p --model claude-haiku-4-5` and uses your **Pro/Max subscription** ($0 extra). Recursion is prevented by setting `GBRAIN_HOOK_RUNNING=1` before the child call; the script bails immediately if it sees that env var.
+   - **Fallback:** if `claude` CLI is missing, the script falls back to a direct Anthropic API call using `ANTHROPIC_API_KEY` from `~/gbrain/.env` or the shell environment (~1-3¢ per session at Haiku-4-5 prices).
+   - **No auth available:** the script logs `[skip] reason=no_auth` and exits 0 cleanly. Add either.
 3. Add this to `~/.claude/settings.json` (merge with existing `hooks` if present):
 
 ```json
