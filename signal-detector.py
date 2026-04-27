@@ -210,6 +210,12 @@ def _log_write_failure(slug: str, reason: str, stderr: str = "") -> None:
     except Exception:
         pass
 
+def _yaml_escape(s: str) -> str:
+    """Quote a string for safe YAML inclusion. Always double-quoted to handle
+    colons, hashes, brackets, leading/trailing whitespace, etc."""
+    s = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", "")
+    return f'"{s}"'
+
 def write_to_gbrain(slug: str, title: str, body: str, session_id: str) -> bool:
     # Pre-validate slug to avoid wasted gbrain CLI invocations
     if not slug or len(slug) > 120 or "//" in slug or slug.startswith("/") or slug.endswith("/"):
@@ -224,8 +230,8 @@ def write_to_gbrain(slug: str, title: str, body: str, session_id: str) -> bool:
     page = (
         f"---\n"
         f"type: {slug.split('/',1)[0]}\n"
-        f"title: {title}\n"
-        f"source_session: {session_id}\n"
+        f"title: {_yaml_escape(title)}\n"
+        f"source_session: {_yaml_escape(session_id)}\n"
         f"captured_at: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
         f"---\n\n{body}\n"
     )
