@@ -79,6 +79,24 @@ The CLI wrapper (`SKILL.md`) is identical for both. Both invocation paths call t
 - L13 reads `/proc/$pid/environ` which is mode `0400` (owner only). Run as the same user that owns `openclaw-node`.
 - The script is bash + Python 3 + `gbrain` + `openclaw` CLIs. No external dependencies installed.
 
+## Installing on a new machine
+
+Interactive bootstrap that detects your OS, installs the canonical GBrain from GitHub (not the squatted npm package), reuses or creates the brain config, and asks per-client which MCP clients to wire (Claude Code, Cursor, Windsurf — and explicitly skips clients that need an HTTP wrapper not yet available):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/bootstrap.sh)
+```
+
+Full prompt-by-prompt walkthrough in [INSTALL.md](INSTALL.md).
+
+## Connecting multiple clients to one brain
+
+See [CONNECT.md](CONNECT.md) for the verified compatibility matrix and step-by-step recipes for sharing one GBrain across Claude Code on multiple machines, Cursor, Windsurf, and a frank explanation of what does NOT work today (Claude Desktop, claude.ai web Cowork, mobile — they need an HTTP wrapper that the v0.21.0 binary does not include).
+
+## Architecture audit
+
+[ARCHITECTURE.md](ARCHITECTURE.md) is the end-to-end mental model — diagrams of the multi-machine brain, per-machine zoom (config / binary / serve / jobs / autopilot), full inventory of what is connected and why (and what is NOT and why), data-flow walkthrough of a write-on-laptop / read-on-server roundtrip, and a 6-step audit checklist to run on each node.
+
 ## License
 
 MIT.
