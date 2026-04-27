@@ -6,6 +6,53 @@ Mirrors the OpenClaw `signal-detector` skill pattern, ported to Claude Code as a
 
 By default, Claude Code does NOT write to GBrain. The MCP wiring lets the model query/write when it chooses to, but conversational sessions end without leaving a trail in the brain. OpenClaw users have `signal-detector` doing this for Telegram chats; this brings the same pattern to terminal sessions.
 
+## What is captured WHERE — honest matrix
+
+| Where you talk / type | Captured to GBrain? | Mechanism |
+|---|---|---|
+| Claude Code on a server (EC2, VPS) | ✅ Yes, automatic | Stop hook (this skill) |
+| Claude Code on a laptop terminal — any project directory | ✅ Yes, automatic | Stop hook (this skill); every project's transcript lives under `~/.claude/projects/<sanitized-cwd>/` and all flow through the same hook |
+| Antigravity (VS Code with Claude Code embedded) | ✅ Yes, automatic | Antigravity reuses the same `~/.claude/settings.json` → same Stop hook |
+| Cursor / Windsurf | ❌ Not by this skill | These IDEs do not expose a Stop hook; would need a separate watcher per IDE |
+| Claude Desktop app | ❌ Not today | Claude Desktop has no Stop hook mechanism. Once a remote-MCP HTTP wrapper exists (see [CONNECT.md](CONNECT.md)), the model can write to GBrain *when explicitly instructed* during a chat — but there is no automatic end-of-session capture |
+| claude.ai web (chat, Cowork) | ❌ Not today | Same as Desktop: no hook mechanism; auto-capture needs a different design |
+| Claude mobile | ❌ Not today | Same |
+
+The asymmetry is deliberate to be honest about. Stop hooks are a Claude Code feature; they don't exist for Desktop, web, or mobile. Phase 4 (HTTP wrapper) unblocks *MCP writes from those clients on demand*, but **automatic** capture from Desktop/web/mobile remains an open design problem.
+
+## Verifying the per-client behavior
+
+After installing this skill, run these checks to confirm.
+
+**1. Server (Claude Code on EC2 / VPS):** start a session, hold a real conversation (decisions, ideas, entities), exit. Then on the same machine:
+
+```bash
+tail -3 ~/.gbrain/hooks/signal-detector.log
+# expect: [ok:<sid>] captured: N decisions, N insights, ...
+gbrain list -n 5
+# expect: new pages with decisions/, originals/, concepts/, etc.
+```
+
+**2. Laptop (Claude Code on Mac):** same, but on the Mac. Then verify the laptop's pages reach the shared brain by querying from the server:
+
+```bash
+# on EC2:
+gbrain list -n 10 | grep "$(date +%Y-%m-%d)"
+# should show pages whose source_session matches the laptop session_id
+```
+
+**3. Per-project (Claude Code on the laptop, working in different repos):** open Claude Code from inside `~/projects/A` and have a real conversation, exit. Open Claude Code from inside `~/projects/B`, have another conversation, exit. Then:
+
+```bash
+ls ~/.claude/projects/   # one entry per project — Claude Code separates transcripts by cwd
+tail -10 ~/.gbrain/hooks/signal-detector.log
+# expect two recent [ok:...] lines, one per session
+```
+
+The hook reads the newest transcript at fire time, so every project's session ends up capturing into the same shared GBrain — provenance is preserved via the `source_session` frontmatter on each page.
+
+**4. Claude Desktop / web / mobile (negative test):** chat normally with claims like "we decided X" — none of those will appear in `gbrain list`. That confirms the matrix above is accurate, not that something is broken.
+
 ## What gets captured
 
 Per the OpenClaw signal-detector contract:
