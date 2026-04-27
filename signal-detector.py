@@ -197,7 +197,30 @@ def call_extraction(transcript: str, api_key: str | None) -> tuple[dict, str]:
     return {"skip_reason": f"no_auth ({cli_skip})", "decisions":[], "insights":[], "entities":[], "concepts":[]}, "none"
 
 # ─── GBrain page write ───────────────────────────────────
+SLUG_RE = __import__("re").compile(r"^[a-z0-9][a-z0-9-]*(?:/[a-z0-9][a-z0-9-]*)*$")
+
+WRITE_FAILURES_LOG = HOME / ".gbrain/hooks/write-failures.log"
+
+def _log_write_failure(slug: str, reason: str, stderr: str = "") -> None:
+    try:
+        WRITE_FAILURES_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with WRITE_FAILURES_LOG.open("a") as f:
+            ts = datetime.now(timezone.utc).isoformat(timespec='seconds')
+            f.write(f"{ts}\tslug={slug}\treason={reason}\tstderr={stderr[:300]}\n")
+    except Exception:
+        pass
+
 def write_to_gbrain(slug: str, title: str, body: str, session_id: str) -> bool:
+    # Pre-validate slug to avoid wasted gbrain CLI invocations
+    if not slug or len(slug) > 120 or "//" in slug or slug.startswith("/") or slug.endswith("/"):
+        _log_write_failure(slug, "slug_invalid_shape")
+        return False
+    if not SLUG_RE.match(slug):
+        _log_write_failure(slug, "slug_invalid_chars")
+        return False
+    if not title or not body:
+        _log_write_failure(slug, "empty_title_or_body")
+        return False
     page = (
         f"---\n"
         f"type: {slug.split('/',1)[0]}\n"
@@ -209,8 +232,15 @@ def write_to_gbrain(slug: str, title: str, body: str, session_id: str) -> bool:
     try:
         r = subprocess.run([GBRAIN_BIN, "put", slug], input=page,
                            capture_output=True, text=True, timeout=30)
-        return r.returncode == 0
-    except Exception:
+        if r.returncode == 0:
+            return True
+        _log_write_failure(slug, f"exit_{r.returncode}", r.stderr or r.stdout)
+        return False
+    except subprocess.TimeoutExpired:
+        _log_write_failure(slug, "timeout")
+        return False
+    except Exception as e:
+        _log_write_failure(slug, f"exception: {e}")
         return False
 
 # ─── Main ────────────────────────────────────────────────
