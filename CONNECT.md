@@ -14,10 +14,10 @@ Practical reference for sharing one brain across multiple AI clients (Claude Cod
 | Claude Code (any host) | local machine | stdio | ✅ Yes | `claude mcp add gbrain -- gbrain serve` |
 | Cursor | local machine | stdio | ✅ Yes | Add MCP server entry in Cursor settings |
 | Windsurf | local machine | stdio | ✅ Yes | Add MCP server entry in Windsurf settings |
-| Claude Desktop | local machine | HTTP only | ❌ Not today | Needs HTTP wrapper |
-| claude.ai web (incl. Cowork) | Anthropic servers | HTTP only | ❌ Not today | Needs HTTP wrapper + public URL |
-| Claude mobile (iOS/Android) | Anthropic servers | HTTP only | ❌ Not today | Needs HTTP wrapper + public URL |
-| Perplexity | Perplexity servers | HTTP only | ❌ Not today | Needs HTTP wrapper + public URL |
+| Claude Desktop | local machine | HTTP + OAuth 2.1 | ✅ Yes | See [PHASE_4_GUIDE.md](PHASE_4_GUIDE.md) — HTTP wrapper + OAuth |
+| claude.ai web (incl. Cowork) | Anthropic servers | HTTP + OAuth 2.1 | ✅ Yes | See [PHASE_4_GUIDE.md](PHASE_4_GUIDE.md) — HTTP wrapper + OAuth + public URL |
+| Claude mobile (iOS/Android) | Anthropic servers | HTTP + OAuth 2.1 | ✅ Yes | Same connector as web (account-level) — see [PHASE_4_GUIDE.md](PHASE_4_GUIDE.md) |
+| Perplexity | Perplexity servers | HTTP + Bearer | ✅ Yes | HTTP wrapper alone (Bearer-only, no OAuth required) |
 
 ## How shared brain works (architecture)
 

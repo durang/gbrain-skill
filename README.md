@@ -91,7 +91,7 @@ Full prompt-by-prompt walkthrough in [INSTALL.md](INSTALL.md).
 
 ## Connecting multiple clients to one brain
 
-See [CONNECT.md](CONNECT.md) for the verified compatibility matrix and step-by-step recipes for sharing one GBrain across Claude Code on multiple machines, Cursor, Windsurf, and a frank explanation of what does NOT work today (Claude Desktop, claude.ai web Cowork, mobile — they need an HTTP wrapper that the v0.21.0 binary does not include).
+See [CONNECT.md](CONNECT.md) for the verified compatibility matrix. Stdio clients (Claude Code, Cursor, Windsurf) connect locally; HTTP+OAuth clients (Claude Desktop, claude.ai web, Cowork, mobile, Perplexity) connect via the [HTTP wrapper](https://github.com/durang/gbrain-http-wrapper) — see [PHASE_4_GUIDE.md](PHASE_4_GUIDE.md) for the complete recipe with OAuth 2.1, OIDC discovery, and all 11 bug-fix iterations documented.
 
 ## Architecture audit
 

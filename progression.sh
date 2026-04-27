@@ -99,14 +99,24 @@ detect_phase() {
       return 2
       ;;
     5A)
-      [ -d "$HOME_DIR/gbrain-http-wrapper" ] && [ -f "$HOME_DIR/gbrain-http-wrapper/src/server.ts" ] && return 0
-      return 1
+      [ -d "$HOME_DIR/gbrain-http-wrapper" ] && [ -f "$HOME_DIR/gbrain-http-wrapper/src/server.ts" ] || return 1
+      # Also verify wrapper has OAuth + dual-route mounting (hallmarks of post-bugfix v6+)
+      grep -q "openid-configuration" "$HOME_DIR/gbrain-http-wrapper/src/oauth.ts" 2>/dev/null && return 0
+      return 2
       ;;
     5B)
       tailscale funnel status 2>&1 | grep -q "/mcp" && return 0
       return 1
       ;;
     5C)
+      # OAuth-issued token in access_tokens table = at least one client connected via claude.ai
+      if [ -f "$HOME_DIR/.gbrain/config.json" ] && command -v gbrain >/dev/null 2>&1; then
+        if [ -n "${DATABASE_URL:-}" ] || [ -f "$HOME_DIR/gbrain/.env" ]; then
+          # Best-effort detect; fallback if env unavailable
+          [ -f "$HOME_DIR/.gbrain/.cowork-connected" ] && return 0
+          return 2  # partial — wrapper is up, OAuth metadata served, awaiting first claude.ai connection
+        fi
+      fi
       [ -f "$HOME_DIR/.gbrain/.cowork-connected" ] && return 0
       return 1
       ;;
@@ -124,10 +134,10 @@ declare -A PHASE_NEXT=(
   [2]="claude mcp add gbrain -- gbrain serve  (or run install-capture.sh)"
   [3]="bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/install-capture.sh)"
   [4]="Install gbrain on a 2nd machine pointing at the same database_url, run a real session, then re-check"
-  [5A]="Tell your AI assistant: \"go Phase 4A ambos protocolos\" (or solo streamable). Builds gbrain-http-wrapper/. ~2-3 hrs assistant work."
-  [5B]="After 4A done: tailscale funnel --bg --set-path /mcp 8787 + bun run gbrain/src/commands/auth.ts create"
-  [5C]="After 4B done: in claude.ai/settings/connectors paste your Tailscale URL + Bearer token"
-  [5D]="After 4A validated: open PR at https://github.com/garrytan/gbrain with the wrapper as native gbrain serve --http"
+  [5A]="See PHASE_4_GUIDE.md. Reference impl: github.com/durang/gbrain-http-wrapper. ~2-3 hrs of assistant work first time, faster after."
+  [5B]="tailscale funnel --bg --set-path /mcp 8787 (after Phase 5A wrapper running on :8787)"
+  [5C]="In claude.ai/settings/connectors → Add Custom → paste your Tailscale Funnel URL + /mcp suffix → master password approval. Connector becomes account-level (Desktop, web, Cowork, mobile all use it)."
+  [5D]="After 4A-C stable for ~1 week: PR at github.com/garrytan/gbrain (Path A = recipe, Path B = native gbrain serve --http)"
 )
 
 # Verification tests per phase (Markdown bullet form, evaluated on next run)
