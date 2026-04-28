@@ -1,0 +1,144 @@
+{
+  "$schema": "https://gbrain-skill.local/manifest.schema.v1.json",
+  "name": "gbrain-stack",
+  "version": "1.0.0",
+  "description": "Canonical inventory of Sergio's GBrain + OpenClaw + wrapper stack. Used by /gbrain bootstrap to verify a fresh install has everything correctly. Used by /gbrain learn to detect drift and propose updates.",
+  "last_updated": "2026-04-28T05:50:00Z",
+  "host_assumptions": {
+    "platform": "linux",
+    "shell": "bash",
+    "user": "ec2-user",
+    "home": "$HOME"
+  },
+  "components": {
+    "core_tools": [
+      {
+        "id": "gbrain",
+        "kind": "binary",
+        "expected_path": "$HOME/.bun/bin/gbrain",
+        "expected_version_min": "0.22.5",
+        "version_cmd": "gbrain --version | awk '{print $2}'",
+        "install_cmd": "bun install -g github:garrytan/gbrain",
+        "verify_cmd": "gbrain doctor --json | head -1 | python3 -c \"import json,sys;print(json.load(sys.stdin).get('health_score','?'))\"",
+        "verify_expected": "score >= 70"
+      },
+      {
+        "id": "openclaw",
+        "kind": "binary",
+        "resolve_path_cmd": "command -v openclaw || which openclaw",
+        "expected_version_min": "2026.4.23",
+        "version_cmd": "openclaw --version | awk '{print $2}'",
+        "install_cmd": "npm install -g openclaw",
+        "verify_cmd": "systemctl --user is-active openclaw-gateway openclaw-node",
+        "verify_expected": "both active"
+      }
+    ],
+    "skills": [
+      {
+        "id": "gbrain",
+        "path": "$HOME/.openclaw/skills/gbrain/",
+        "required_files": ["SKILL.md", "run.sh", "PRINCIPLES.md", "MANIFEST.json"],
+        "kind": "dashboard"
+      },
+      {
+        "id": "brain-write-macro",
+        "path": "$HOME/.openclaw/skills/brain-write-macro/",
+        "required_files": ["SKILL.md"],
+        "kind": "behavior",
+        "custom_instructions_version": 2,
+        "custom_instructions_flag": "$HOME/.gbrain/custom-instructions-applied.flag",
+        "manual_user_action": "Paste Custom Instructions snippet at https://claude.ai → Settings → Profile, then `echo 2 > ~/.gbrain/custom-instructions-applied.flag`"
+      },
+      {
+        "id": "signal-detector",
+        "path": "$HOME/.openclaw/skills/signal-detector/",
+        "required_files": ["SKILL.md"],
+        "kind": "ambient-capture",
+        "companion_hook": "$HOME/.gbrain/hooks/signal-detector.py",
+        "companion_settings": "$HOME/.claude/settings.json"
+      }
+    ],
+    "wrappers_and_services": [
+      {
+        "id": "gbrain-http-wrapper",
+        "kind": "systemd-service",
+        "service_name": "gbrain-http-wrapper",
+        "repo": "https://github.com/durang/gbrain-http-wrapper",
+        "expected_path": "$HOME/gbrain-http-wrapper/",
+        "expected_port": 8787,
+        "verify_cmd": "curl -s http://127.0.0.1:8787/health | python3 -c \"import json,sys;print(json.load(sys.stdin)['status'])\"",
+        "verify_expected": "ok"
+      }
+    ],
+    "configs": [
+      {
+        "id": "openclaw-config",
+        "path": "$HOME/.openclaw/openclaw.json",
+        "permissions": "600",
+        "must_contain_keys": ["mcp.servers.gbrain", "channels.telegram", "agents.defaults.model"]
+      },
+      {
+        "id": "gbrain-config",
+        "path": "$HOME/.gbrain/config.json",
+        "permissions": "600",
+        "must_contain_keys": ["engine", "database_url"]
+      },
+      {
+        "id": "wrapper-env",
+        "path": "$HOME/gbrain-http-wrapper/.env",
+        "permissions": "600",
+        "must_contain_keys": ["PORT", "GBRAIN_OAUTH_PASSWORD"]
+      },
+      {
+        "id": "soul-md",
+        "path": "$HOME/SOUL.md",
+        "permissions": "644",
+        "must_contain_substring": "brain-write-macro/SKILL.md"
+      }
+    ],
+    "cron_jobs": [
+      { "id": "616d2c20-d06d-4116-830b-2b097b6fe819", "name": "GBrain Sync", "expected_schedule": "*/15 * * * *" },
+      { "id": "363ae2bf-a065-4b50-9033-1397c77ae93b", "name": "GBrain Weekly Doctor", "expected_schedule": "0 9 * * 0" },
+      { "id": "009487c5-bfa8-4fb0-965b-0d59beb4a8a7", "name": "GBrain Daily Report", "expected_schedule": "0 20 * * *" },
+      { "id": "a6896cd4-069f-4447-ab67-7a74434f7b6f", "name": "GBrain Dream", "expected_schedule": "0 3 * * *" }
+    ],
+    "schema_contracts": {
+      "description": "Required postgres tables and columns. Used by /gbrain Layer 3b for drift detection.",
+      "tables": {
+        "pages": ["id", "slug", "type", "compiled_truth", "frontmatter", "created_at", "updated_at"],
+        "content_chunks": ["id", "page_id", "chunk_index", "chunk_text", "embedding", "embedded_at"],
+        "access_tokens": ["id", "name", "token_hash", "created_at", "last_used_at", "revoked_at"],
+        "oauth_clients": ["client_id", "client_name", "redirect_uris"],
+        "oauth_codes": ["code_hash", "client_id", "redirect_uri", "code_challenge", "expires_at"],
+        "oauth_refresh_tokens": ["refresh_hash", "client_id", "access_token_name", "expires_at"],
+        "ingest_log": ["id", "source_type", "source_ref", "summary", "created_at"],
+        "links": ["id", "from_page_id", "to_page_id", "link_type"]
+      }
+    },
+    "upstream_issues_open": [
+      {
+        "url": "https://github.com/openclaw/openclaw/issues/73327",
+        "title": "Per-job stuckThresholdMs",
+        "blocks": "Telegram noise from GBrain Sync false positives",
+        "auto_resolve_when": "Released in OpenClaw >= 2026.4.27 OR feature shows up in `openclaw --help`"
+      },
+      {
+        "url": "https://github.com/garrytan/gbrain/pull/481",
+        "title": "claude-code-capture recipe",
+        "blocks": "Nothing — capability exists locally as Stop hook",
+        "auto_resolve_when": "Merged → recipe appears in upstream `recipes/`"
+      }
+    ]
+  },
+  "evidence_tests": {
+    "description": "Each test must produce a deterministic pass/fail verdict. Run as part of /gbrain learn to validate proposed improvements before promoting.",
+    "tests": {
+      "core_tools_present": "gbrain --version && openclaw --version",
+      "wrapper_responds": "curl -sf http://127.0.0.1:8787/health",
+      "brain_health_floor": "[ $(gbrain doctor --json | tail -1 | python3 -c 'import json,sys;print(json.load(sys.stdin)[\"health_score\"])') -ge 70 ]",
+      "embedding_coverage": "[ $(gbrain doctor --json | tail -1 | python3 -c 'import json,sys;[print(c[\"message\"]) for c in json.load(sys.stdin)[\"checks\"] if c[\"name\"]==\"embeddings\"]' | grep -oE '[0-9]+%' | head -1 | tr -d '%') -ge 95 ]",
+      "schema_contract": "psql \"$(python3 -c \"import json;print(json.load(open('$HOME/.gbrain/config.json'))['database_url'])\")\" -At -c \"SELECT 1 FROM information_schema.columns WHERE table_name='oauth_clients' AND column_name='client_id' LIMIT 1\" | grep -q 1",
+      "skill_self_check": "test -f $HOME/.openclaw/skills/brain-write-macro/SKILL.md && test -f $HOME/.openclaw/skills/gbrain/PRINCIPLES.md"
+    }
+  }
+}

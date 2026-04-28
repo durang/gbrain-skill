@@ -38,6 +38,10 @@ except Exception as e:
 }
 
 count_stuck_sessions_last_hour() {
+  # CANÓNICO: respeta el detector OpenClaw, NO clasifica ni filtra. Si OpenClaw dice "stuck", es stuck.
+  # Si el umbral 120s te genera ruido en jobs slow legítimos (GBrain Sync), el fix correcto es
+  # upstream en OpenClaw (umbral configurable per-job), NO un workaround local que oculte señal.
+  # Ver issue: https://github.com/openclaw/openclaw/issues/73327 (per-job stuckThresholdMs)
   local LOG="/tmp/openclaw/openclaw-$(date -u +%Y-%m-%d).log"
   [ -f "$LOG" ] || { echo 0; return; }
   local CUTOFF=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M)
@@ -131,6 +135,9 @@ run_check() {
   echo "| \`/gbrain bugs\` | Solo bugs upstream que afectan TU stack actual | Cuando algo se rompe sin razón aparente |"
   echo "| \`/gbrain compare\` | Diff vs snapshot anterior (detecta regresiones) | Después de upgrade o cambio mayor |"
   echo "| \`/gbrain save\` | Guarda este reporte en \`~/brain/reports/gbrain-YYYY-MM-DD.md\` | Para historial / compartir con otros |"
+  echo "| \`/gbrain bootstrap\` | Verifica que el host tenga TODO lo del MANIFEST.json instalado correctamente | Después de \`git clone\` en EC2 nueva, o periódicamente |"
+  echo "| \`/gbrain principles\` | Lee las reglas operacionales (canónico siempre gana, etc.) | Antes de tocar cualquier skill |"
+  echo "| \`/gbrain manifest\` | Lee el MANIFEST.json (canonical inventory de tu stack) | Cuando quieras saber qué versión esperada tienes |"
   echo ""
   echo "**Cómo invocar:**"
   echo "- Aquí (Claude Code terminal): escribe \`/gbrain\` o \`/gbrain <subcomando>\`"
@@ -154,7 +161,8 @@ try:
     else: print(0)
 except: print(0)" 2>/dev/null)
   ALERTS=()
-  [ "$STUCK" -gt 0 ] 2>/dev/null && ALERTS+=("🔴 **$STUCK stuck session(s)** en última hora — el agente está colgándose")
+  # CANÓNICO: respeta el detector de OpenClaw. Cualquier stuck = alert. Si hay ruido, fix raíz upstream.
+  [ "$STUCK" -gt 0 ] 2>/dev/null && ALERTS+=("🔴 **$STUCK stuck session(s)** en última hora — el detector OpenClaw los marcó")
   [ "$KEYS" -eq 0 ] 2>/dev/null && ALERTS+=("🔴 **openclaw-node sin API keys** en su environment — fix: \`EnvironmentFile=\` en el systemd unit")
   [ "$FB_COUNT" -eq 0 ] 2>/dev/null && ALERTS+=("🟠 **Modelo sin fallbacks** — si MiniMax timeouts, la sesión muere. Configura \`agents.defaults.model.fallbacks\`")
   [ "$QUEUE_DEPTH" -gt 100 ] 2>/dev/null && ALERTS+=("🟠 **Queue depth=$QUEUE_DEPTH** en autopilot-cycle — workers atorados")
@@ -190,6 +198,7 @@ except: print(0)" 2>/dev/null)
   echo "| 1 | 📦 Versiones | GBrain + OpenClaw vs latest |"
   echo "| 2 | 🏥 Runtime | Gateway, Telegram, modelo, fallbacks |"
   echo "| 3 | 🔬 Doctor | gbrain doctor structured |"
+  echo "| 3b | 🔗 Schema correlation | tablas BD ↔ wrapper ↔ skills (detecta drift silencioso) |"
   echo "| 4 | 📊 Stats | pages/chunks/links/timeline |"
   echo "| 5 | 🎯 Skills | skills cargadas en OpenClaw |"
   echo "| 6 | 📈 Captura 24h | efectividad de signal-detector |"
@@ -198,9 +207,12 @@ except: print(0)" 2>/dev/null)
   echo "| 9 | 📸 Snapshot diff | regresiones desde última corrida |"
   echo "| 10 | 📜 Archivos canónicos | mtime de SOUL/MEMORY/openclaw.json |"
   echo "| 11 | 🔌 MCP Health | servidores MCP y binarios |"
+  echo "| 11b | 🧩 Wrappers + Integrations | wrappers HTTP, integration recipes, OAuth clients, captura por origen |"
   echo "| 12 | ⏱️ Stuck sessions | sesiones colgadas última hora |"
   echo "| 13 | 🔑 Process env | API keys en openclaw-node |"
   echo "| 14 | ⏰ Cron failures | jobs fallando en 24h |"
+  echo "| 15 | 🚀 Upstream changelog | commits + cross-ref con warnings + posts del autor |"
+  echo "| 16 | 🎲 Upgrade Decision Engine | INSTALAR / ESPERAR / SKIP con razones (gbrain + openclaw) |"
   echo "| 15 | 🚀 Upstream changelog | commits + cross-ref con warnings |"
   echo ""
   echo "---"
@@ -280,6 +292,53 @@ try:
 except Exception as e:
     print(f'(doctor failed: {e})')
 "
+  echo ""
+
+  # ─── Layer 3b: Schema correlation (¿wrapper sigue compatible con la BD?) ───
+  echo "## 🔗 Layer 3b — Schema correlation (BD ↔ wrapper ↔ skills)"
+  echo ""
+  echo "_¿Qué mido?_ Verifico que las tablas + columnas que el **wrapper** y los **skills** esperan existan en la BD actual. Si gbrain hace una migration que renombra una columna o quita una tabla, el wrapper rompe **silenciosamente** (errores 500 en producción). Esto detecta el drift antes de que pase."
+  echo ""
+
+  declare -A REQUIRED_COLS
+  REQUIRED_COLS["pages"]="id slug type compiled_truth frontmatter created_at updated_at"
+  REQUIRED_COLS["content_chunks"]="id page_id chunk_index chunk_text embedding embedded_at"
+  REQUIRED_COLS["access_tokens"]="id name token_hash created_at last_used_at revoked_at"
+  REQUIRED_COLS["oauth_clients"]="client_id client_name redirect_uris"
+  REQUIRED_COLS["oauth_codes"]="code_hash client_id redirect_uri code_challenge expires_at"
+  REQUIRED_COLS["oauth_refresh_tokens"]="refresh_hash client_id access_token_name expires_at"
+  REQUIRED_COLS["ingest_log"]="id source_type source_ref summary created_at"
+  REQUIRED_COLS["links"]="id from_page_id to_page_id link_type"
+
+  echo "| Tabla | Cols esperadas | Cols presentes | Status |"
+  echo "|---|---|---|---|"
+  SCHEMA_DRIFT=0
+  for tbl in "${!REQUIRED_COLS[@]}"; do
+    expected="${REQUIRED_COLS[$tbl]}"
+    actual=$(PGCONNECT_TIMEOUT=5 psql "$DATABASE_URL" -At -F' ' -c "SELECT string_agg(column_name, ' ') FROM information_schema.columns WHERE table_name='$tbl' AND table_schema='public';" 2>/dev/null)
+    if [ -z "$actual" ]; then
+      echo "| \`$tbl\` | $(echo $expected | wc -w) | 0 | 🔴 TABLA NO EXISTE |"
+      SCHEMA_DRIFT=$((SCHEMA_DRIFT+1))
+      continue
+    fi
+    missing=""
+    for col in $expected; do
+      echo " $actual " | grep -q " $col " || missing="$missing $col"
+    done
+    if [ -z "$missing" ]; then
+      echo "| \`$tbl\` | $(echo $expected | wc -w) | $(echo $actual | wc -w) | ✅ |"
+    else
+      echo "| \`$tbl\` | $(echo $expected | wc -w) | $(echo $actual | wc -w) | 🔴 falta:$missing |"
+      SCHEMA_DRIFT=$((SCHEMA_DRIFT+1))
+    fi
+  done
+  echo ""
+  if [ "$SCHEMA_DRIFT" -gt 0 ]; then
+    echo "⚠️ **$SCHEMA_DRIFT tabla(s) con drift de schema** — el wrapper o skills locales pueden romper. Investigar con \`gbrain doctor\` y revisar release notes upstream."
+    ALERTS+=("- 🔴 **Schema drift en $SCHEMA_DRIFT tabla(s)** — wrapper en riesgo de romper")
+  else
+    echo "✅ Todas las tablas críticas tienen las columnas esperadas. Wrapper y skills compatibles con la BD actual."
+  fi
   echo ""
 
   # ─── Layer 4: Stats ───
@@ -448,6 +507,179 @@ PY
   mcp_server_health
   echo ""
 
+  # ─── Layer 11b: Stack ligado a GBrain (gbrain principal + satélites) ───
+  echo "## 🧩 Layer 11b — Stack ligado a GBrain"
+  echo ""
+  echo "_¿Qué mido?_ El stack completo alrededor de tu brain. **GBrain es el principal** (la BD, el CLI, el MCP server). Todo lo demás son **satélites** que extienden capacidades a clientes que GBrain core no soporta:"
+  echo ""
+  echo "- 🥇 **GBrain (core)** — la base. CLI + Postgres + MCP server stdio."
+  echo "- 🛰️ **gbrain-http-wrapper** (tu repo) — extiende GBrain a Desktop/web/mobile via HTTP+OAuth."
+  echo "- 🛰️ **brain-write-macro** (skill local) — extiende captura por frase a clientes sin hook."
+  echo "- 🛰️ **integration recipes** — extiende ingest a fuentes externas (email, calendar, etc.)."
+  echo ""
+  echo "Si mañana subes un plugin nuevo o cambias el wrapper, esta sección lo refleja sin tocar el script."
+  echo ""
+
+  # — A: HTTP wrappers locales (systemd, dedupe) —
+  echo "### A. HTTP wrappers (systemd)"
+  echo ""
+  echo "| Service | Status | Port | Endpoint | Health |"
+  echo "|---|---|---|---|---|"
+  declare -A seen_svc
+  for svc_unit in /etc/systemd/system/*gbrain*.service /etc/systemd/system/*brain-http*.service /etc/systemd/system/*mcp*.service; do
+    [ ! -f "$svc_unit" ] && continue
+    svc_name=$(basename "$svc_unit" .service)
+    [ -n "${seen_svc[$svc_name]}" ] && continue
+    seen_svc[$svc_name]=1
+    svc_state=$(systemctl is-active "$svc_name" 2>/dev/null || echo "unknown")
+    case "$svc_state" in
+      active)   icon="✅ active" ;;
+      inactive) icon="⬜ inactive" ;;
+      *)        icon="❌ $svc_state" ;;
+    esac
+    # Port detection: try unit file → EnvironmentFile → common ports
+    port=$(grep -oE "PORT=[0-9]+" "$svc_unit" 2>/dev/null | head -1 | cut -d= -f2)
+    if [ -z "$port" ]; then
+      env_file=$(grep -oE "EnvironmentFile=\S+" "$svc_unit" 2>/dev/null | head -1 | cut -d= -f2)
+      if [ -n "$env_file" ] && [ -r "$env_file" ]; then
+        port=$(grep -oE "^PORT=[0-9]+" "$env_file" 2>/dev/null | head -1 | cut -d= -f2)
+      fi
+    fi
+    # Probe known ports if still unknown
+    [ -z "$port" ] && for try_port in 8787 8888 3000; do
+      curl -s --max-time 1 "http://127.0.0.1:$try_port/health" 2>/dev/null | grep -q "ok\|status" && { port=$try_port; break; }
+    done
+    endpoint="-"
+    health="-"
+    if [ "$svc_state" = "active" ] && [ -n "$port" ]; then
+      endpoint="http://127.0.0.1:$port"
+      health_raw=$(curl -s --max-time 3 "$endpoint/health" 2>/dev/null | head -c 80)
+      if [ -n "$health_raw" ]; then
+        health="✅ $health_raw"
+      else
+        health="❌ unreachable"
+      fi
+    fi
+    echo "| $svc_name | $icon | ${port:-?} | $endpoint | $health |"
+    # ALSO test PUBLIC path (Tailscale Funnel) — local OK ≠ public OK (TLS cert desync caught us once)
+    if [ "$svc_name" = "gbrain-http-wrapper" ] && [ "$svc_state" = "active" ]; then
+      PUBLIC_URL=$(grep -E "^WRAPPER_BASE_URL=" "$HOME/gbrain-http-wrapper/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' | tr -d ' ')
+      if [ -n "$PUBLIC_URL" ]; then
+        PUBLIC_CODE=$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" "$PUBLIC_URL/health" 2>/dev/null)
+        if [ "$PUBLIC_CODE" = "200" ]; then
+          public_status="✅ HTTP $PUBLIC_CODE"
+        elif [ "$PUBLIC_CODE" = "000" ]; then
+          public_status="🔴 TLS/network fail (HTTP 000) — \`sudo tailscale funnel reset && sudo tailscale funnel --bg --set-path=/mcp http://127.0.0.1:$port\`"
+        else
+          public_status="🟡 HTTP $PUBLIC_CODE"
+        fi
+        echo "| └─ public | _via Tailscale Funnel_ | - | $PUBLIC_URL | $public_status |"
+      fi
+    fi
+  done
+  if [ ${#seen_svc[@]} -eq 0 ]; then
+    echo "| _(none detected)_ | - | - | - | No HTTP wrappers as systemd units |"
+  fi
+  echo ""
+
+  # — B: Integration recipes (gbrain integrations list) —
+  echo "### B. Integration recipes registrados en gbrain"
+  echo ""
+  if [ -x "$HOME/.bun/bin/gbrain" ]; then
+    integrations_out=$($HOME/.bun/bin/gbrain integrations list 2>&1 | grep -v "Prepared statements" | head -30)
+    if echo "$integrations_out" | grep -qiE "configured|installed|active"; then
+      echo "$integrations_out" | sed 's/^/    /' | head -20
+    else
+      echo "_No integrations configured. Available recipes via_ \`gbrain integrations list-available\`_._"
+    fi
+  else
+    echo "_gbrain CLI not found at expected path._"
+  fi
+  echo ""
+
+  # — C: OAuth clients + tokens activos (firma de qué clientes externos están ligados) —
+  echo "### C. OAuth clients (clientes externos ligados al brain)"
+  echo ""
+  echo "| Client name | Last used | Created |"
+  echo "|---|---|---|"
+  if [ -n "$DATABASE_URL" ] || command -v psql >/dev/null 2>&1; then
+    DB_URL_LOCAL="${DATABASE_URL:-$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('~/.gbrain/config.json')))['database_url'])" 2>/dev/null)}"
+    if [ -n "$DB_URL_LOCAL" ]; then
+      PGCONNECT_TIMEOUT=5 psql "$DB_URL_LOCAL" -At -F' | ' -c "
+        SELECT c.client_name, COALESCE(MAX(t.last_used_at)::timestamp(0)::text, 'never'), c.created_at::date
+        FROM oauth_clients c
+        LEFT JOIN access_tokens t ON t.name LIKE 'oauth/' || c.client_id || '%'
+        GROUP BY c.client_id, c.client_name, c.created_at
+        ORDER BY MAX(t.last_used_at) DESC NULLS LAST
+        LIMIT 10;
+      " 2>/dev/null | sed 's/^/| /; s/$/ |/' | head -10
+    else
+      echo "| - | - | _no DB URL_ |"
+    fi
+  fi
+  echo ""
+
+  # — D-pre: brain-write-macro skill detection + upstream replacement check —
+  echo "### D. Brain-write-macro (skill puente para clientes sin hook)"
+  echo ""
+  if [ -f "$HOME/.openclaw/skills/brain-write-macro/SKILL.md" ]; then
+    echo "✅ Skill instalado: \`~/.openclaw/skills/brain-write-macro/SKILL.md\`"
+    # Check if upstream gbrain has absorbed this functionality
+    UPSTREAM_REPLACEMENT=""
+    if gbrain --help 2>&1 | grep -qiE "save-conv|save_conversation|phrase-trigger"; then
+      UPSTREAM_REPLACEMENT=$(gbrain --help 2>&1 | grep -iE "save-conv|save_conversation|phrase-trigger" | head -1)
+    fi
+    if [ -n "$UPSTREAM_REPLACEMENT" ]; then
+      echo "⚠️ **Upstream gbrain ya tiene un reemplazo nativo:** \`$UPSTREAM_REPLACEMENT\`"
+      echo "   → considera deprecar este skill. Ver _Auto-deprecation conditions_ en SKILL.md."
+    else
+      echo "  No hay reemplazo upstream todavía — este skill sigue siendo necesario."
+    fi
+    # Custom Instructions version drift check — alerta si hay que repegar el bloque
+    SKILL_CI_VERSION=$(grep -oE "^custom-instructions-version: [0-9]+" "$HOME/.openclaw/skills/brain-write-macro/SKILL.md" 2>/dev/null | awk '{print $2}')
+    [ -z "$SKILL_CI_VERSION" ] && SKILL_CI_VERSION="?"
+    if [ -f "$HOME/.gbrain/custom-instructions-applied.flag" ]; then
+      USER_CI_VERSION=$(head -1 "$HOME/.gbrain/custom-instructions-applied.flag" 2>/dev/null | tr -d ' \n')
+      [ -z "$USER_CI_VERSION" ] && USER_CI_VERSION="0"
+      if [ "$USER_CI_VERSION" = "$SKILL_CI_VERSION" ]; then
+        echo "  ✅ Custom Instructions de claude.ai aplicadas — **v$USER_CI_VERSION** (al día)"
+      else
+        echo "  🔴 **Custom Instructions desactualizadas:** tienes v$USER_CI_VERSION en claude.ai, el skill define v$SKILL_CI_VERSION"
+        echo "     → Repegar el bloque actualizado en https://claude.ai → Settings → Profile"
+        echo "     → Después: \`echo \"$SKILL_CI_VERSION\" > ~/.gbrain/custom-instructions-applied.flag\`"
+        echo "     Changelog:"
+        sed -n '/custom-instructions-changelog:/,/^[a-z-]*:/p' "$HOME/.openclaw/skills/brain-write-macro/SKILL.md" 2>/dev/null | grep -E "^  v" | sed 's/^/       /'
+      fi
+    else
+      echo "  ⚠️ Falta pegar el bloque en https://claude.ai → Settings → Profile → Custom Instructions"
+      echo "     (sin esto, mobile/web/desktop NO reconocen \"guarda en gbrain\")"
+      echo "     Después: \`echo \"$SKILL_CI_VERSION\" > ~/.gbrain/custom-instructions-applied.flag\`"
+    fi
+  else
+    echo "❌ Skill no instalado. Crear con \`mkdir -p ~/.openclaw/skills/brain-write-macro && touch SKILL.md\`"
+  fi
+  echo ""
+
+  # — D: Pages capturadas en últimas 24h, agrupadas por fuente (qué cliente capturó) —
+  echo "### E. Captura últimas 24h por origen"
+  echo ""
+  if [ -n "$DB_URL_LOCAL" ]; then
+    echo "| Origen | Pages 24h | Última |"
+    echo "|---|---|---|"
+    PGCONNECT_TIMEOUT=5 psql "$DB_URL_LOCAL" -At -F' | ' -c "
+      SELECT
+        COALESCE(SPLIT_PART(slug,'/',1), 'root') AS origen,
+        COUNT(*) AS n,
+        MAX(updated_at)::timestamp(0)::text AS last
+      FROM pages
+      WHERE updated_at > NOW() - INTERVAL '24 hours'
+      GROUP BY origen
+      ORDER BY n DESC
+      LIMIT 8;
+    " 2>/dev/null | sed 's/^/| /; s/$/ |/' | head -8
+  fi
+  echo ""
+
   # ─── Layer 12: Stuck sessions ───
   echo "## ⏱️ Layer 12 — Stuck sessions (última hora)"
   echo ""
@@ -455,7 +687,11 @@ PY
   echo ""
   STUCK_COUNT=$(count_stuck_sessions_last_hour)
   if [ "$STUCK_COUNT" -gt 0 ] 2>/dev/null; then
-    echo "🔴 **$STUCK_COUNT stuck session(s) en última hora** — revisar en \`/tmp/openclaw/openclaw-$(date -u +%Y-%m-%d).log\`"
+    echo "🔴 **$STUCK_COUNT stuck session(s) en última hora** — el detector de OpenClaw los marcó (umbral 120s)."
+    echo ""
+    echo "   _Reglas canónicas_: respetamos lo que dice OpenClaw. Si crees que el umbral es bajo para algún job (ej. GBrain Sync con sync remoto 2-3 min), el fix correcto es **upstream** — [issue #73327 abierto](https://github.com/openclaw/openclaw/issues/73327): \`stuckThresholdMs\` configurable per-job."
+    echo "   - Revisar log: \`grep \"stuck session\" /tmp/openclaw/openclaw-$(date -u +%Y-%m-%d).log | tail -5\`"
+    echo "   - Cross-check si el job completó: \`tail -3 ~/.openclaw/cron/runs/<job-id>-*.jsonl | grep status\`"
   else
     echo "✅ 0 stuck sessions — el agente no está colgándose"
   fi
@@ -581,6 +817,138 @@ try:
             print('')
 except Exception as e: print(f'(error: {e})')
 " 2>/dev/null
+  echo ""
+
+  # ─── Layer 16: Upgrade Decision Engine ───
+  echo "## 🎲 Layer 16 — Upgrade Decision Engine"
+  echo ""
+  echo "_¿Qué mido?_ Para CADA herramienta crítica de tu stack (gbrain + openclaw), aplico la heurística que un ingeniero senior usaría: ¿está al día?, ¿hay regresiones reportadas en la versión nueva?, ¿afectan TU workflow específicamente (cron, mcp, telegram)?, ¿qué tan reciente es el release? Output: veredicto **INSTALAR / ESPERAR / SKIP** con razones concretas y links a issues. Esta capa reemplaza el \"yo me decidí solo\" — encapsula la lógica de revisión."
+  echo ""
+
+  upgrade_decision() {
+    local TOOL="$1" REPO="$2" CUR="$3" LATEST_RAW="$4"
+    # Strip leading 'v'
+    local LATEST="${LATEST_RAW#v}"
+    local DECISION REASON ISSUES_RECENT REGRESSION_HITS
+    if [ -z "$LATEST" ]; then
+      echo "| $TOOL | $CUR | ? | ⚠️ unknown | Could not fetch latest version |"
+      return
+    fi
+    if [ "$CUR" = "$LATEST" ]; then
+      echo "| $TOOL | $CUR | $LATEST | ✅ AT LATEST | Nada que hacer |"
+      return
+    fi
+    # Get release age + open regression issues mentioning this version OR newer
+    local RELEASE_AGE_HOURS=$(curl -sS "https://api.github.com/repos/$REPO/releases/tags/v$LATEST" 2>/dev/null | python3 -c "
+import json, sys, datetime
+try:
+    r = json.load(sys.stdin)
+    pub = r.get('published_at')
+    if pub:
+        d = datetime.datetime.strptime(pub, '%Y-%m-%dT%H:%M:%SZ')
+        h = int((datetime.datetime.utcnow() - d).total_seconds() / 3600)
+        print(h)
+except: print('?')
+" 2>/dev/null)
+    # Search open issues created post-release that mention the version (regressions)
+    local SINCE=$(date -u -d "5 days ago" '+%Y-%m-%dT%H:%M' 2>/dev/null || date -u -v-5d '+%Y-%m-%dT%H:%M' 2>/dev/null)
+    local ISSUES_JSON=$(gh issue list --repo "$REPO" --search "$LATEST regression OR $LATEST broke OR $LATEST fail in:title,body created:>$SINCE" --state open --limit 8 --json number,title,createdAt 2>/dev/null)
+    REGRESSION_HITS=$(echo "$ISSUES_JSON" | python3 -c "
+import json, sys
+try:
+    issues = json.load(sys.stdin)
+    # Stack-relevant keywords for THIS user
+    stack = ['cron', 'mcp', 'telegram', 'gateway', 'session', 'plugin', 'install', 'autopilot', 'queue', 'worker']
+    relevant = []
+    for i in issues[:8]:
+        title = i.get('title','').lower()
+        if any(k in title for k in stack):
+            relevant.append(f\"#{i['number']} {i['title'][:60]}\")
+    print('||'.join(relevant))
+except: pass
+" 2>/dev/null)
+    # Decide
+    local AGE_HOURS_NUM=0
+    [ "$RELEASE_AGE_HOURS" != "?" ] && AGE_HOURS_NUM="$RELEASE_AGE_HOURS"
+    if [ -n "$REGRESSION_HITS" ]; then
+      DECISION="🛑 ESPERAR"
+      REASON="Regresiones que afectan tu stack: $(echo "$REGRESSION_HITS" | tr '|' ',' | head -c 150)"
+    elif [ "$AGE_HOURS_NUM" -lt 24 ] 2>/dev/null; then
+      DECISION="🟡 ESPERAR"
+      REASON="Release con <24h de rodaje (${AGE_HOURS_NUM}h). Esperar a que la comunidad reporte."
+    elif [ "$AGE_HOURS_NUM" -lt 48 ] 2>/dev/null; then
+      DECISION="🟡 ESPERAR"
+      REASON="Release con <48h (${AGE_HOURS_NUM}h). Sin regresiones reportadas todavía. Recheck mañana."
+    else
+      DECISION="✅ INSTALAR"
+      REASON="Release tiene ${AGE_HOURS_NUM}h sin regresiones reportadas que afecten tu stack."
+    fi
+    echo "| $TOOL | $CUR | $LATEST | $DECISION | $REASON |"
+  }
+
+  # Get versions
+  GBRAIN_CUR=$(gbrain --version 2>&1 | head -1 | awk '{print $2}')
+  # gbrain doesn't use GitHub releases — derive latest from package.json on master, fallback to tags
+  GBRAIN_LATEST=$(curl -sS "https://raw.githubusercontent.com/garrytan/gbrain/master/package.json" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('version',''))" 2>/dev/null)
+  if [ -z "$GBRAIN_LATEST" ]; then
+    GBRAIN_LATEST=$(curl -sS "https://api.github.com/repos/garrytan/gbrain/tags?per_page=5" 2>/dev/null | python3 -c "
+import json, sys, re
+try:
+    tags = json.load(sys.stdin)
+    for t in tags:
+        n = t.get('name','').lstrip('v')
+        if re.match(r'^\d+\.\d+\.\d+$', n):
+            print(n); break
+except: pass
+" 2>/dev/null)
+  fi
+  OC_CUR=$(openclaw --version 2>&1 | head -1 | awk '{print $2}')
+  OC_LATEST=$(curl -sS "https://api.github.com/repos/openclaw/openclaw/releases/latest" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('tag_name','').lstrip('v'))" 2>/dev/null)
+
+  echo "| Tool | Tu versión | Latest | Veredicto | Razón |"
+  echo "|---|---|---|---|---|"
+  upgrade_decision "gbrain"   "garrytan/gbrain"   "$GBRAIN_CUR" "$GBRAIN_LATEST"
+  upgrade_decision "openclaw" "openclaw/openclaw" "$OC_CUR"     "$OC_LATEST"
+  echo ""
+
+  # Best stack snapshot (the canonical "what would I install fresh today")
+  echo "### 🥇 Tu mejor stack hoy"
+  echo ""
+  echo "Si arrancaras de cero AHORA en una EC2 limpia, instalarías:"
+  echo ""
+  echo "- **gbrain** \`$GBRAIN_LATEST\` — última estable, fix wave incluido (#447)"
+  echo "- **openclaw** $(if [ -n "$OC_LATEST" ]; then echo "\`$OC_LATEST\`"; else echo "última estable"; fi) — solo si no hay regresiones contra tu uso (cron/telegram/mcp)"
+  echo "- **gbrain-http-wrapper** (tu repo) — OAuth 2.1 + PKCE + DCR + refresh tokens"
+  echo "- **signal-detector hook** — captura ambient en Claude Code CLI"
+  echo "- **claude-code-capture recipe** (PR #481 a Garry, pending merge) — alternativa empaquetada del hook"
+  echo ""
+  echo "**Tu stack actual:**"
+  echo "- gbrain \`$GBRAIN_CUR\` $([ "$GBRAIN_CUR" = "$GBRAIN_LATEST" ] && echo "✅ al día" || echo "⚠️ atrasado a \`$GBRAIN_LATEST\`")"
+  echo "- openclaw \`$OC_CUR\` $([ "$OC_CUR" = "$OC_LATEST" ] && echo "✅ al día" || echo "⚠️ atrasado a \`$OC_LATEST\`")"
+  echo "- wrapper: ✅ corriendo (port 8787)"
+  echo "- hook: ✅ activo (signal-detector v7)"
+  echo ""
+
+  # Open regression issues affecting your stack RIGHT NOW
+  echo "### 🔥 Issues abiertos hoy (últimas 24h) en herramientas de tu stack"
+  echo ""
+  echo "| Repo | # | Title | Edad |"
+  echo "|---|---|---|---|"
+  SINCE_24H=$(date -u -d "24 hours ago" '+%Y-%m-%dT%H:%M' 2>/dev/null || date -u -v-1d '+%Y-%m-%dT%H:%M' 2>/dev/null)
+  for repo in "garrytan/gbrain" "openclaw/openclaw"; do
+    gh issue list --repo "$repo" --search "is:open created:>$SINCE_24H" --limit 5 --json number,title,createdAt 2>/dev/null | python3 -c "
+import json, sys, datetime
+try:
+    issues = json.load(sys.stdin)
+    stack = ['cron','mcp','telegram','gateway','session','plugin','install','autopilot','queue','worker','migration','schema','pgvector','embed']
+    for i in issues[:5]:
+        title = i.get('title','').lower()
+        if any(k in title for k in stack):
+            ago_h = int((datetime.datetime.utcnow() - datetime.datetime.strptime(i['createdAt'][:19], '%Y-%m-%dT%H:%M:%S')).total_seconds() / 3600)
+            print(f\"| $repo | #{i['number']} | {i['title'][:65]} | {ago_h}h |\")
+except: pass
+" 2>/dev/null
+  done
   echo ""
 
   # ─── Drift notification (NEW v2: silent push if NEW alert CATEGORY appears) ───
@@ -819,5 +1187,8 @@ case "$SUBCMD" in
   bugs) run_bugs ;;
   compare) run_compare ;;
   save) run_save ;;
-  *) echo "Unknown subcommand: $SUBCMD"; echo "Use: check | fix | news | bugs | compare | save"; exit 1 ;;
+  bootstrap) bash "$SKILL_DIR/bootstrap.sh" ;;
+  principles) cat "$SKILL_DIR/PRINCIPLES.md" ;;
+  manifest) cat "$SKILL_DIR/MANIFEST.json" ;;
+  *) echo "Unknown subcommand: $SUBCMD"; echo "Use: check | fix | news | bugs | compare | save | bootstrap | principles | manifest"; exit 1 ;;
 esac

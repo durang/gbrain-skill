@@ -1,268 +1,209 @@
 #!/usr/bin/env bash
-# GBrain Multi-Client Bootstrap
-# Interactive installer: detects host, asks which clients to connect,
-# verifies shared brain. Documented in INSTALL.md and CONNECT.md.
+# /gbrain bootstrap — verifica que el host actual tenga TODO lo del MANIFEST.json instalado correctamente.
+# Si falta algo, reporta + propone install steps. Idempotente.
 #
-# Usage:
-#   bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/bootstrap.sh)
-# or, if you already have the repo:
-#   bash bootstrap.sh
+# Diseño:
+#   - NO hace cambios sin confirmación explícita (todos los install_cmd se imprimen, no se ejecutan)
+#   - Lee MANIFEST.json como fuente única de verdad
+#   - Output diferenciado: ✅ OK / 🟡 manual action needed / 🔴 missing/broken
+#   - Exit 0 si todo OK, exit 1 si hay missing/broken (para CI/cron uso)
 
-set -euo pipefail
+set -uo pipefail
 
-# ── colors ────────────────────────────────────────
-if [ -t 1 ]; then
-  C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'; C_RESET=$'\033[0m'
-else
-  C_OK=""; C_WARN=""; C_ERR=""; C_DIM=""; C_BOLD=""; C_RESET=""
-fi
+MANIFEST="$HOME/.openclaw/skills/gbrain/MANIFEST.json"
+[ ! -f "$MANIFEST" ] && { echo "❌ MANIFEST.json no existe en $MANIFEST"; exit 2; }
 
-ok()   { echo "${C_OK}✓${C_RESET} $*"; }
-warn() { echo "${C_WARN}⚠${C_RESET} $*"; }
-err()  { echo "${C_ERR}✗${C_RESET} $*" >&2; }
-hdr()  { echo ""; echo "${C_BOLD}── $* ──${C_RESET}"; }
-ask()  {
-  # ask "prompt" "default" → echoes user response
-  local prompt="$1" default="${2:-}" reply
-  if [ -n "$default" ]; then
-    read -p "  $prompt [$default]: " reply </dev/tty || reply=""
-    echo "${reply:-$default}"
-  else
-    read -p "  $prompt: " reply </dev/tty || reply=""
-    echo "$reply"
-  fi
-}
-yesno() {
-  # yesno "Question?" "y|n" → returns 0 if yes, 1 if no
-  local prompt="$1" default="${2:-n}" reply
-  local hint="[y/N]"; [ "$default" = "y" ] && hint="[Y/n]"
-  read -p "  $prompt $hint: " reply </dev/tty || reply=""
-  reply="${reply:-$default}"
-  case "$reply" in y|Y|yes|YES|s|S|si|SI) return 0 ;; *) return 1 ;; esac
+# Helper: jq-lite via python3 to avoid external dep
+manifest_get() {
+  python3 -c "import json,sys; d=json.load(open('$MANIFEST')); v=d
+for k in '$1'.split('.'):
+    v = v.get(k, {}) if isinstance(v, dict) else v
+print(json.dumps(v))" 2>/dev/null
 }
 
-# ── 1. Detect host ────────────────────────────────
-hdr "Detect host"
-OS="$(uname -s)"
-ARCH="$(uname -m)"
-HOST="$(hostname -s 2>/dev/null || hostname)"
-case "$OS" in
-  Darwin) HOST_KIND="Mac" ;;
-  Linux)  HOST_KIND="Linux" ;;
-  *)      HOST_KIND="Other ($OS)" ;;
-esac
-ok "Host: $HOST_KIND ($HOST, $ARCH)"
+ISSUES=0
+PASS=0
+TOTAL=0
 
-# ── 2. Pre-flight: Bun ────────────────────────────
-hdr "Pre-flight: Bun runtime"
-export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
-export PATH="$BUN_INSTALL/bin:$PATH"
-if command -v bun >/dev/null 2>&1; then
-  ok "Bun: $(bun --version)"
-else
-  if yesno "Bun is required. Install it now?" "y"; then
-    curl -fsSL https://bun.sh/install | bash
-    export PATH="$BUN_INSTALL/bin:$PATH"
-    ok "Bun installed: $(bun --version)"
-  else
-    err "Bun required. Aborting."; exit 1
-  fi
-fi
-
-# ── 3. Pre-flight: gbrain ─────────────────────────
-hdr "Pre-flight: GBrain CLI"
-GBRAIN_NEEDS_REINSTALL=0
-if command -v gbrain >/dev/null 2>&1; then
-  GVER="$(gbrain --version 2>&1 | head -1 | awk '{print $NF}')"
-  case "$GVER" in
-    0.2*|0.3*) ok "gbrain $GVER (canonical Garry Tan version)" ;;
-    *)
-      warn "gbrain $GVER detected — not the canonical version (expected 0.2x.x from github:garrytan/gbrain)"
-      if yesno "Reinstall the canonical version from GitHub?" "y"; then
-        GBRAIN_NEEDS_REINSTALL=1
-      fi
-      ;;
-  esac
-else
-  GBRAIN_NEEDS_REINSTALL=1
-fi
-
-if [ "$GBRAIN_NEEDS_REINSTALL" = "1" ]; then
-  bun remove -g gbrain 2>/dev/null || true
-  rm -f "$HOME/.bun/bin/gbrain" 2>/dev/null || true
-  bun install -g github:garrytan/gbrain
-  hash -r 2>/dev/null || true
-  ok "gbrain $(gbrain --version 2>&1 | head -1 | awk '{print $NF}') installed"
-fi
-
-# ── 4. Backend: Postgres database_url ─────────────
-hdr "Backend: shared brain (Postgres)"
-CFG="$HOME/.gbrain/config.json"
-if [ -f "$CFG" ]; then
-  EXISTING_URL="$(python3 -c "import json,sys; print(json.load(open('$CFG')).get('database_url',''))" 2>/dev/null || echo "")"
-  if [ -n "$EXISTING_URL" ]; then
-    ok "Existing config found at $CFG"
-    echo "  ${C_DIM}URL prefix: $(echo "$EXISTING_URL" | cut -c1-40)...${C_RESET}"
-    if yesno "Keep this database_url?" "y"; then
-      DBURL="$EXISTING_URL"
-    fi
-  fi
-fi
-
-if [ -z "${DBURL:-}" ]; then
-  echo "  No usable config. Choose backend:"
-  echo "    1) Paste an existing Postgres URL (Supabase, Neon, RDS, etc.)"
-  echo "    2) Run 'gbrain init --pglite' for a local-only brain (not shared)"
-  echo "    3) Abort"
-  CHOICE=$(ask "Choice (1/2/3)" "1")
-  case "$CHOICE" in
-    1)
-      DBURL=$(ask "Postgres URL (postgresql://user:pass@host:port/db)" "")
-      [ -n "$DBURL" ] || { err "Empty URL"; exit 1; }
-      mkdir -p "$HOME/.gbrain"
-      cat > "$CFG" <<JSON
-{
-  "engine": "postgres",
-  "database_url": "$DBURL"
-}
-JSON
-      chmod 600 "$CFG"
-      ok "Wrote $CFG (mode 600)"
-      ;;
-    2)
-      gbrain init --pglite
-      ok "Local PGLite brain initialized (this client will NOT share with others)"
-      DBURL="(pglite)"
-      ;;
-    *) err "Aborted"; exit 1 ;;
-  esac
-fi
-
-# ── 5. Verify shared brain ────────────────────────
-hdr "Verify connection to shared brain"
-if [ "$DBURL" != "(pglite)" ]; then
-  gbrain doctor --fast || warn "doctor returned warnings (often benign with --fast)"
-  echo ""
-  echo "  Sample pages already in this brain:"
-  gbrain list -n 5 2>/dev/null | sed 's/^/    /' || warn "list failed"
-fi
-
-# ── 6. Per-client MCP registration ────────────────
-hdr "Connect MCP clients"
-echo "  For each client, you'll be asked yes/no. Skip what you don't use."
+echo "# /gbrain bootstrap — canonical state verification"
+echo ""
+echo "_Manifest version: $(manifest_get version | tr -d '\"')_"
+echo "_Last updated: $(manifest_get last_updated | tr -d '\"')_"
 echo ""
 
-GBRAIN_BIN="$(command -v gbrain || echo $HOME/.bun/bin/gbrain)"
-ANY_CONNECTED=0
+# ═════════════ Section 1: core_tools ═════════════
+echo "## 🔧 Core tools"
+echo ""
+echo "| Tool | Path | Version | Status |"
+echo "|---|---|---|---|"
+python3 << EOF
+import json, os, subprocess
+m = json.load(open('$MANIFEST'))
+for tool in m['components']['core_tools']:
+    # Resolve path: prefer resolve_path_cmd if defined, else use expected_path with envvar expansion
+    if tool.get('resolve_path_cmd'):
+        try:
+            path = subprocess.check_output(tool['resolve_path_cmd'], shell=True, text=True, stderr=subprocess.DEVNULL).strip().split('\n')[0]
+        except Exception:
+            path = ''
+    else:
+        path = os.path.expandvars(tool.get('expected_path', ''))
+    exists = path and os.path.exists(path)
+    status = "❌ missing" if not exists else "✅"
+    version = "-"
+    if exists:
+        try:
+            v = subprocess.check_output(tool['version_cmd'], shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+            version = v or "?"
+            if v < tool.get('expected_version_min', '0'):
+                status = f"🟡 v{v} < min v{tool['expected_version_min']}"
+        except Exception as e:
+            version = f"err: {str(e)[:30]}"
+            status = "🔴 cannot run"
+    display_path = (path or '?')[:60]
+    print(f"| \`{tool['id']}\` | \`{display_path}\` | {version} | {status} |")
+    if not exists:
+        install = tool.get('install_cmd', '_(no install_cmd in manifest)_')
+        print(f"|   | _Install:_ \`{install}\` | | |")
+EOF
+echo ""
 
-# Claude Code (terminal / Antigravity / VS Code with Claude extension all share ~/.claude.json)
-if command -v claude >/dev/null 2>&1; then
-  if yesno "Connect Claude Code (terminal, Antigravity, VS Code Claude extension — they share user config)?" "y"; then
-    claude mcp add gbrain -- "$GBRAIN_BIN" serve 2>&1 || warn "(may already be registered)"
-    ok "Claude Code wired"
-    ANY_CONNECTED=1
-  fi
-else
-  if yesno "Claude Code CLI not found. Install it now? (npm i -g @anthropic-ai/claude-code)" "n"; then
-    npm i -g @anthropic-ai/claude-code
-    claude mcp add gbrain -- "$GBRAIN_BIN" serve 2>&1 || true
-    ANY_CONNECTED=1
-  fi
-fi
-
-# Cursor
-if yesno "Connect Cursor (if installed)?" "n"; then
-  CURSOR_CFG="$HOME/.cursor/mcp.json"
-  mkdir -p "$(dirname "$CURSOR_CFG")"
-  if [ -f "$CURSOR_CFG" ] && grep -q '"gbrain"' "$CURSOR_CFG"; then
-    ok "Cursor already has gbrain configured"
-  else
-    # Merge or create
-    python3 - <<PY
+# ═════════════ Section 2: skills ═════════════
+echo "## 🎯 Skills"
+echo ""
+echo "| Skill | Path | Files OK | Manual action |"
+echo "|---|---|---|---|"
+python3 << EOF
 import json, os
-p = os.path.expanduser("$CURSOR_CFG")
-data = {"mcpServers": {}}
-if os.path.exists(p):
-    try: data = json.load(open(p))
-    except: pass
-data.setdefault("mcpServers", {})
-data["mcpServers"]["gbrain"] = {"command": "$GBRAIN_BIN", "args": ["serve"]}
-json.dump(data, open(p,"w"), indent=2)
-PY
-    ok "Cursor wired ($CURSOR_CFG)"
-  fi
-  ANY_CONNECTED=1
-fi
-
-# Windsurf
-if yesno "Connect Windsurf (if installed)?" "n"; then
-  WS_CFG="$HOME/.codeium/windsurf/mcp_config.json"
-  mkdir -p "$(dirname "$WS_CFG")"
-  python3 - <<PY
-import json, os
-p = os.path.expanduser("$WS_CFG")
-data = {"mcpServers": {}}
-if os.path.exists(p):
-    try: data = json.load(open(p))
-    except: pass
-data.setdefault("mcpServers", {})
-data["mcpServers"]["gbrain"] = {"command": "$GBRAIN_BIN", "args": ["serve"]}
-json.dump(data, open(p,"w"), indent=2)
-PY
-  ok "Windsurf wired ($WS_CFG)"
-  ANY_CONNECTED=1
-fi
-
-# Claude Desktop — needs HTTP wrapper (not available in v0.2x stdio-only)
+m = json.load(open('$MANIFEST'))
+for sk in m['components']['skills']:
+    path = os.path.expandvars(sk['path'])
+    if not os.path.isdir(path):
+        print(f"| \`{sk['id']}\` | \`{path}\` | ❌ dir missing | mkdir -p \`{path}\` |")
+        continue
+    missing = [f for f in sk['required_files'] if not os.path.isfile(os.path.join(path, f))]
+    files_ok = "✅ all" if not missing else f"🔴 missing: {', '.join(missing)}"
+    manual = "—"
+    if sk.get('manual_user_action'):
+        flag = sk.get('custom_instructions_flag', '')
+        if flag:
+            flag = os.path.expandvars(flag)
+            if os.path.exists(flag):
+                with open(flag) as f: applied_v = f.read().strip() or "0"
+                req_v = str(sk.get('custom_instructions_version', ''))
+                if applied_v == req_v:
+                    manual = f"✅ v{applied_v} applied"
+                else:
+                    manual = f"🟡 v{applied_v} applied, need v{req_v} — repaste at claude.ai"
+            else:
+                manual = "🟡 not applied — see SKILL.md for snippet"
+    print(f"| \`{sk['id']}\` | \`{path[:40]}\` | {files_ok} | {manual} |")
+EOF
 echo ""
-warn "Claude Desktop, claude.ai web, Claude mobile, and Perplexity require an HTTP"
-warn "wrapper around 'gbrain serve' which is NOT in the v0.2x binary today."
-warn "See CONNECT.md → 'What about HTTP / Claude Desktop / claude.ai web?' for the"
-warn "three real paths (wait upstream / build wrapper / contribute PR)."
-if yesno "Mark these as TODO in $HOME/.gbrain/TODO.md?" "n"; then
-  mkdir -p "$HOME/.gbrain"
-  cat >> "$HOME/.gbrain/TODO.md" <<TODO
-## $(date -u +%F) — HTTP wrapper deferred
-Clients waiting on HTTP transport (gbrain serve --http or custom wrapper):
-  - Claude Desktop ($HOST_KIND)
-  - claude.ai web (Cowork, chat)
-  - Claude mobile
-See https://github.com/durang/gbrain-skill/blob/master/CONNECT.md
-TODO
-  ok "TODO appended"
-fi
 
-# ── 7. Bidirectional brain test (optional) ────────
-hdr "Optional: bidirectional brain test"
-if [ "$DBURL" != "(pglite)" ] && yesno "Write a ping page to verify shared-brain end-to-end?" "y"; then
-  SLUG="test/bootstrap-ping-$(date -u +%s)"
-  echo "ping from $HOST_KIND:$HOST at $(date -u +%FT%TZ)" | "$GBRAIN_BIN" put "$SLUG"
-  ok "Wrote $SLUG to shared brain"
-  echo "  ${C_DIM}From any other connected machine, run:${C_RESET}"
-  echo "    gbrain get $SLUG"
-  echo "  ${C_DIM}You should see the same string. That confirms shared brain.${C_RESET}"
-fi
-
-# ── 8. Shell PATH hint ────────────────────────────
-hdr "Shell PATH"
-SHELL_RC=""
-[ -f "$HOME/.zshrc" ] && SHELL_RC="$HOME/.zshrc"
-[ -z "$SHELL_RC" ] && [ -f "$HOME/.bashrc" ] && SHELL_RC="$HOME/.bashrc"
-if [ -n "$SHELL_RC" ] && ! grep -q "\.bun/bin" "$SHELL_RC" 2>/dev/null; then
-  if yesno "Append '$BUN_INSTALL/bin' to PATH in $SHELL_RC?" "y"; then
-    echo 'export PATH="$HOME/.bun/bin:$PATH"' >> "$SHELL_RC"
-    ok "PATH updated in $SHELL_RC (source it or open a new terminal)"
-  fi
-fi
-
-# ── 9. Summary ────────────────────────────────────
-hdr "Summary"
-ok "GBrain CLI: $(gbrain --version 2>&1 | head -1 | awk '{print $NF}')"
-ok "Backend: $([ "$DBURL" = "(pglite)" ] && echo "PGLite (local-only)" || echo "Postgres (shared)")"
-[ "$ANY_CONNECTED" = "1" ] && ok "At least one MCP client wired" || warn "No MCP clients wired"
+# ═════════════ Section 3: wrappers + services ═════════════
+echo "## 🛰️ Wrappers & services"
 echo ""
-echo "${C_BOLD}Next:${C_RESET}"
-echo "  - Restart Claude Code / Cursor / Windsurf to pick up new MCP entry"
-echo "  - Try: 'search my brain for [topic]' inside the client"
-echo "  - For HTTP-only clients (Desktop/web/mobile), see CONNECT.md"
+echo "| Service | Status | Health probe |"
+echo "|---|---|---|"
+python3 << EOF
+import json, os, subprocess
+m = json.load(open('$MANIFEST'))
+for w in m['components']['wrappers_and_services']:
+    if w['kind'] == 'systemd-service':
+        sname = w['service_name']
+        try:
+            active = subprocess.check_output(['systemctl', 'is-active', sname], text=True, stderr=subprocess.DEVNULL).strip()
+        except subprocess.CalledProcessError as e:
+            active = e.output.strip() if e.output else 'inactive'
+        status = "✅ active" if active == 'active' else f"🔴 {active}"
+        health = "—"
+        try:
+            h = subprocess.check_output(w['verify_cmd'], shell=True, text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
+            health = "✅" if w.get('verify_expected', '') in h else f"⚠️ {h[:30]}"
+        except Exception:
+            health = "🔴 unreachable"
+        print(f"| \`{w['id']}\` | {status} | {health} |")
+EOF
 echo ""
+
+# ═════════════ Section 4: configs ═════════════
+echo "## 📋 Configs"
+echo ""
+echo "| Config | Permissions | Required keys | Status |"
+echo "|---|---|---|---|"
+python3 << EOF
+import json, os, stat
+m = json.load(open('$MANIFEST'))
+for c in m['components']['configs']:
+    path = os.path.expandvars(c['path'])
+    if not os.path.isfile(path):
+        print(f"| \`{c['id']}\` | - | - | 🔴 missing |")
+        continue
+    perms = oct(stat.S_IMODE(os.stat(path).st_mode))[2:]
+    expected_perms = c.get('permissions')
+    if expected_perms is None:
+        perms_ok = f"({perms} — no spec)"
+    else:
+        perms_ok = "✅" if perms == expected_perms else f"🟡 {perms} (want {expected_perms})"
+    keys_ok = "✅"
+    if c.get('must_contain_keys') and path.endswith('.json'):
+        try:
+            d = json.load(open(path))
+            missing = []
+            for k in c['must_contain_keys']:
+                cur = d
+                for part in k.split('.'):
+                    if isinstance(cur, dict) and part in cur:
+                        cur = cur[part]
+                    else:
+                        missing.append(k); break
+            keys_ok = "✅" if not missing else f"🔴 missing: {', '.join(missing)}"
+        except Exception:
+            keys_ok = "⚠️ parse error"
+    elif c.get('must_contain_substring'):
+        try:
+            content = open(path).read()
+            keys_ok = "✅" if c['must_contain_substring'] in content else "🔴 substring missing"
+        except Exception:
+            keys_ok = "⚠️ read error"
+    print(f"| \`{c['id']}\` | {perms_ok} | {keys_ok} | |")
+EOF
+echo ""
+
+# ═════════════ Section 5: upstream issues being tracked ═════════════
+echo "## 🔥 Upstream issues being tracked"
+echo ""
+echo "| Issue | Title | Status | Auto-resolve when |"
+echo "|---|---|---|---|"
+python3 << EOF
+import json
+m = json.load(open('$MANIFEST'))
+for i in m['components']['upstream_issues_open']:
+    print(f"| {i['url']} | {i['title'][:40]} | OPEN | {i['auto_resolve_when'][:80]} |")
+EOF
+echo ""
+
+# ═════════════ Section 6: evidence tests ═════════════
+echo "## 🧪 Evidence tests (used by /gbrain learn)"
+echo ""
+echo "| Test | Pass? |"
+echo "|---|---|"
+python3 << EOF
+import json, subprocess, os
+m = json.load(open('$MANIFEST'))
+for name, cmd in m['evidence_tests']['tests'].items():
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, timeout=10, env=os.environ)
+        passed = "✅" if r.returncode == 0 else "❌"
+    except Exception:
+        passed = "⏱️ timeout"
+    print(f"| \`{name}\` | {passed} |")
+EOF
+echo ""
+
+echo "## Verdict"
+echo ""
+echo "Run \`/gbrain check\` for full health dashboard."
+echo "Run \`/gbrain principles\` to read operational rules."
+echo "Run \`/gbrain manifest\` to see canonical state inventory."

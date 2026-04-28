@@ -65,9 +65,11 @@ The 14 layers + alert banner cover everything that can drift:
 ## Reference docs
 
 - Full skill spec: `~/.openclaw/skills/gbrain/SKILL.md` (OpenClaw version, idéntica)
+- **Operating principles: `~/.openclaw/skills/gbrain/PRINCIPLES.md`** ← read this BEFORE adding any local classification/filter/whitelist logic. Rule: canonical upstream signals always win, fix raíz upstream, never mask signal locally.
 - Protocol: `~/.openclaw/skills/gbrain/PROTOCOL.md` (qué archivos revisar, 6 métodos detect bugs)
 - Bug report draft: `~/.openclaw/skills/gbrain/BUG_REPORT_DRAFT.md`
 - Snapshots: `~/.openclaw/skills/gbrain/snapshots/` (auto-generated)
+- Decision log: in `PRINCIPLES.md` § 6 — every canonical-vs-workaround choice with rationale + upstream link
 
 ## Note on duplication (Claude Code vs OpenClaw)
 
