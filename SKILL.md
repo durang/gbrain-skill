@@ -3,6 +3,7 @@ name: gbrain
 description: "GBrain canonical health dashboard. 15 layers + alert banner top. Layers: versiones, runtime+fallbacks, doctor, stats, skills, captura ambient 24h, bugs upstream, news con fechas+labels, snapshot diff, file diff, MCP health, stuck sessions detector, process env audit, cron failure rate, upstream changelog vs implementado. Subcomandos: /gbrain check (default), /gbrain fix, /gbrain news, /gbrain bugs, /gbrain compare, /gbrain save. Triggers: /gbrain, revisa gbrain, salud del brain, verifica el brain, gbrain status."
 allowed-tools: Bash Read Write
 user-invocable: true
+distribute-to: [claude, openclaw]
 ---
 
 # /gbrain — GBrain Canonical Health Dashboard

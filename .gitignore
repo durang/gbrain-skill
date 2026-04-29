@@ -1,0 +1,7 @@
+# Runtime state — not part of the skill
+snapshots/
+compound/journal/
+compound/backups/
+compound/learning.json
+*.bak
+*.bak-*
