@@ -157,6 +157,61 @@ The skill follows non-negotiable rules — no local workarounds that mask upstre
 - PRs in flight: [#481](https://github.com/garrytan/gbrain/pull/481) (claude-code-capture recipe), [#509](https://github.com/garrytan/gbrain/pull/509) (compounding-engine recipe)
 - Issues open: [#73327](https://github.com/openclaw/openclaw/issues/73327) (per-job stuckThresholdMs)
 
+## Installing on a new machine
+
+Interactive bootstrap that detects your OS, installs the canonical GBrain from GitHub (not the squatted npm package), reuses or creates the brain config, and asks per-client which MCP clients to wire (Claude Code, Cursor, Windsurf — and explicitly skips clients that need an HTTP wrapper not yet available):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/bootstrap.sh)
+```
+
+Full prompt-by-prompt walkthrough in [INSTALL.md](INSTALL.md).
+
+## Connecting multiple clients to one brain
+
+See [CONNECT.md](CONNECT.md) for the verified compatibility matrix. Stdio clients (Claude Code, Cursor, Windsurf) connect locally; HTTP+OAuth clients (Claude Desktop, claude.ai web, Cowork, mobile, Perplexity) connect via the [HTTP wrapper](https://github.com/durang/gbrain-http-wrapper) — see [PHASE_4_GUIDE.md](PHASE_4_GUIDE.md) for the complete recipe with OAuth 2.1, OIDC discovery, and all 11 bug-fix iterations documented.
+
+## Architecture audit
+
+[ARCHITECTURE.md](ARCHITECTURE.md) is the end-to-end mental model — diagrams of the multi-machine brain, per-machine zoom (config / binary / serve / jobs / autopilot), full inventory of what is connected and why (and what is NOT and why), data-flow walkthrough of a write-on-laptop / read-on-server roundtrip, and a 6-step audit checklist to run on each node.
+
+## Ambient capture for Claude Code
+
+By default, Claude Code does NOT write to GBrain — the MCP wiring lets the model query/write when it chooses, but conversational sessions end without leaving a trail. [CAPTURE.md](CAPTURE.md) documents the Claude Code Stop hook that mirrors OpenClaw's `signal-detector` skill: at session end, a Python script runs in background, asks Haiku to extract decisions / original thinking / entities / concepts, and writes selective pages to GBrain. The full transcript is NOT saved (that would be noise) — only signals worth keeping.
+
+Install with one command:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/install-capture.sh)
+```
+
+Health check + auto-repair:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/capture-doctor.sh)         # check
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/capture-doctor.sh) --fix   # repair
+```
+
+## Progression tracker
+
+`progression.sh` is a stateful walkthrough of the full multi-client setup. Auto-detects which phases you have done, which are pending, and tells you exactly what to do next. Every claim is evidence-based (filesystem + config inspection — no remembered state):
+
+```bash
+# Status overview + next action (markdown)
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/progression.sh)
+
+# Just the next pending action, terse
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/progression.sh) --next
+
+# Save report into your shared brain (queryable from any machine)
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/progression.sh) --save
+
+# Detail for one specific phase
+bash <(curl -fsSL https://raw.githubusercontent.com/durang/gbrain-skill/master/progression.sh) --phase 5A
+```
+
+Tracks 9 phases (Phase 0 install → Phase 4D upstream contribution). Reinstall from scratch and the same script walks you back through every step in order.
+
 ## License
 
 MIT.
