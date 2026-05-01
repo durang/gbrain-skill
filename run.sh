@@ -275,6 +275,7 @@ except: print(0)" 2>/dev/null)
   echo "| 3b | 🔗 Schema correlation | tablas BD ↔ wrapper ↔ skills (detecta drift silencioso) |"
   echo "| 4 | 📊 Stats | pages/chunks/links/timeline |"
   echo "| 5 | 🎯 Skills | skills cargadas en OpenClaw |"
+  echo "| 5b | 🌀 HERMES integration | skills + bot diff + MCP link (parallel runtime) |"
   echo "| 6 | 📈 Captura 24h | efectividad de signal-detector |"
   echo "| 7 | 🐛 Bugs upstream | matchea tu versión vs known bugs |"
   echo "| 8 | 📰 News | releases/PRs/issues con fecha |"
@@ -437,6 +438,48 @@ except Exception as e:
     [ -f ~/.openclaw/skills/$s/SKILL.md ] && echo "| \`$s\` | ✅ |" || echo "| \`$s\` | ❌ missing |"
   done
   echo ""
+
+  # ─── Layer 5b: HERMES skills + integration (NEW — runtime parallel) ───
+  if [ -d "$HOME/.hermes" ]; then
+    echo "## 🌀 Layer 5b — HERMES skills + integration (parallel runtime)"
+    echo ""
+    echo "_¿Qué mido?_ HERMES corre en paralelo a OpenClaw alimentando el mismo brain. Aquí verifico que el setup esté limpio: bot Telegram diferente al de OpenClaw, gbrain MCP server compartido, skills heredadas, gateway status. Detalle granular en \`/hermestrack\`."
+    echo ""
+    HERMES_VER=$($HOME/.local/bin/hermes --version 2>/dev/null | head -1 | awk '{print $3}' || echo "n/a")
+    HERMES_MODEL=$(grep -A 1 "^model:" $HOME/.hermes/config.yaml 2>/dev/null | grep "default:" | head -1 | sed 's/.*default: *"\?\([^"]*\)"\?/\1/')
+    HERMES_PROVIDER=$(grep "provider:" $HOME/.hermes/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
+    HERMES_SKILLS=$(ls $HOME/.hermes/skills/ 2>/dev/null | wc -l)
+    HERMES_IMPORTED=$(ls $HOME/.hermes/skills/openclaw-imports/ 2>/dev/null | wc -l)
+    HERMES_GATEWAY=$($HOME/.local/bin/hermes gateway status 2>&1 | grep -iE "running|stopped" | head -1 | head -c 50)
+    HERMES_BOT=$(grep "^TELEGRAM_BOT_TOKEN" $HOME/.hermes/.env 2>/dev/null | head -1 | head -c 30 | sed 's/=.*/=***/')
+    OPENCLAW_BOT_HASH=$(python3 -c "import json,hashlib;d=json.load(open('$HOME/.openclaw/openclaw.json'));t=d.get('channels',{}).get('telegram',{}).get('botToken','');print(hashlib.sha256(t.encode()).hexdigest()[:8] if t else '')" 2>/dev/null)
+    HERMES_BOT_HASH=$(grep "^TELEGRAM_BOT_TOKEN" $HOME/.hermes/.env 2>/dev/null | sed 's/^TELEGRAM_BOT_TOKEN=//' | head -1 | python3 -c "import sys,hashlib;t=sys.stdin.read().strip();print(hashlib.sha256(t.encode()).hexdigest()[:8] if t else '')" 2>/dev/null)
+    if [ "$OPENCLAW_BOT_HASH" = "$HERMES_BOT_HASH" ] && [ -n "$OPENCLAW_BOT_HASH" ]; then
+      BOT_DIFF="🔴 SAME bot — VAN A PELEAR por mensajes (OpenClaw o HERMES debe usar bot diferente)"
+    else
+      BOT_DIFF="✅ different (no polling conflict)"
+    fi
+    HERMES_MCP_GBRAIN=$(grep -E "gbrain:" $HOME/.hermes/config.yaml 2>/dev/null | wc -l)
+    if [ "$HERMES_MCP_GBRAIN" -gt 0 ] 2>/dev/null; then
+      MCP_LINK="✅ HERMES → gbrain MCP server registered"
+    else
+      MCP_LINK="⚠️ HERMES no tiene gbrain MCP configurado — corre 'hermes mcp add gbrain'"
+    fi
+
+    echo "| Check | Valor |"
+    echo "|---|---|"
+    echo "| Versión HERMES | \`$HERMES_VER\` |"
+    echo "| Modelo default | \`$HERMES_MODEL\` |"
+    echo "| Provider | \`$HERMES_PROVIDER\` |"
+    echo "| Skills totales (bundled+imports) | $HERMES_SKILLS |"
+    echo "| Skills importadas de OpenClaw | $HERMES_IMPORTED |"
+    echo "| MCP gbrain link | $MCP_LINK |"
+    echo "| Bot Telegram vs OpenClaw | $BOT_DIFF |"
+    echo "| Gateway status | $HERMES_GATEWAY |"
+    echo ""
+    echo "Para detalle granular: \`/hermestrack\`"
+    echo ""
+  fi
 
   # ─── Layer 6: Captura últimas 24h ───
   echo "## 📈 Layer 6 — Captura ambient (últimas 24h)"
@@ -1114,6 +1157,17 @@ for line in sys.stdin:
     LOCAL=$(git -C "$HOME/skills" rev-parse HEAD 2>/dev/null)
     REMOTE=$(git -C "$HOME/skills" rev-parse origin/master 2>/dev/null)
     [ "$LOCAL" != "$REMOTE" ] && PROPAG+=("⚠️ Monorepo \`durang/skills\` tiene cambios upstream sin pull — \`cd ~/skills && git pull\` para sincronizar Mac/EC2.")
+  fi
+  # HERMES installed → propagate skill consistency rules
+  if [ -d "$HOME/.hermes" ]; then
+    PROPAG+=("🌀 HERMES detectado en \`~/.hermes/\` — corre \`/hermestrack\` para detalle granular del runtime paralelo (89 skills bundled + imports de OpenClaw).")
+    if [ "$OPENCLAW_BOT_HASH" = "$HERMES_BOT_HASH" ] && [ -n "$OPENCLAW_BOT_HASH" ]; then
+      PROPAG+=("🔴 CRITICAL: HERMES y OpenClaw usan el MISMO bot Telegram → polling conflict. Cambia uno de los 2 tokens YA con \`@BotFather\`.")
+    fi
+    HERMES_IMPORTS=$(ls $HOME/.hermes/skills/openclaw-imports/ 2>/dev/null | wc -l)
+    if [ "$HERMES_IMPORTS" -gt 0 ] 2>/dev/null; then
+      PROPAG+=("📦 HERMES tiene $HERMES_IMPORTS skills importadas de OpenClaw — si actualizas \`brain-write-macro\` o \`signal-detector\` en monorepo, corre \`hermes claw migrate --overwrite\` para refrescarlas.")
+    fi
   fi
   if [ ${#PROPAG[@]} -eq 0 ]; then
     echo "_Cero propagaciones pendientes — todos los skills satélite alineados._"
