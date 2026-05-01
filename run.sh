@@ -287,6 +287,7 @@ except: print(0)" 2>/dev/null)
   echo "| 14 | ⏰ Cron failures | jobs fallando en 24h |"
   echo "| 15 | 🚀 Upstream changelog | commits + cross-ref con warnings + posts del autor |"
   echo "| 16 | 🎲 Upgrade Decision Engine | INSTALAR / ESPERAR / SKIP con razones (gbrain + openclaw) |"
+  echo "| 17 | 📡 Upstream Features Watch | tweet-style features informativos + propagación a skills satélite |"
   echo "| 15 | 🚀 Upstream changelog | commits + cross-ref con warnings |"
   echo ""
   echo "---"
@@ -1023,6 +1024,104 @@ try:
 except: pass
 " 2>/dev/null
   done
+  echo ""
+
+  # ─── Layer 17: Upstream Features Watch (NEW) ───
+  echo "## 📡 Layer 17 — Upstream Features Watch"
+  echo ""
+  echo "_¿Qué mido?_ Cuando upstream (gbrain / openclaw) lanza una feature nueva, este layer la surfaceea como **informativa, no urgente**. Lee los últimos 5 commits con palabras clave (\`feat:\`, \`v0.\`) y los cruza contra los módulos que ya tienes activos. Si la feature ya está cubierta por algo que tienes (ej: voice → no relevante porque no usas voz), se silencia. Si es nueva y aplicable, te dice **\"tienes módulo para X — pruébalo\"** con el comando exacto."
+  echo ""
+  CURRENT_GBRAIN_VER=$(gbrain --version 2>/dev/null | awk '{print $2}')
+  CURRENT_OPENCLAW_VER=$(openclaw --version 2>/dev/null | awk '{print $2}')
+  echo "_Tu setup_: gbrain \`$CURRENT_GBRAIN_VER\` · openclaw \`$CURRENT_OPENCLAW_VER\`"
+  echo ""
+  for repo in "garrytan/gbrain" "openclaw/openclaw"; do
+    echo "### Recent feature commits — \`$repo\`"
+    echo ""
+    echo "| Feature | Status local | Try it |"
+    echo "|---|---|---|"
+    gh api "repos/$repo/commits?per_page=8" --jq '.[] | select(.commit.message | test("(?i)v0\\.|feat:")) | {sha: .sha[0:7], date: .commit.committer.date[0:10], msg: .commit.message[0:80]}' 2>/dev/null | python3 -c "
+import json, sys, re, os
+ver_g = '$CURRENT_GBRAIN_VER'
+ver_o = '$CURRENT_OPENCLAW_VER'
+shown = 0
+for line in sys.stdin:
+    if shown >= 6: break
+    try:
+        d = json.loads(line)
+    except: continue
+    msg = d['msg'].replace('|', ' ')
+    # Detect version in commit message
+    m = re.search(r'v(\d+\.\d+\.\d+)', msg)
+    if m:
+        commit_ver = m.group(1)
+        if '$repo' == 'garrytan/gbrain' and commit_ver <= ver_g:
+            status = '✅ instalado'
+        elif '$repo' == 'openclaw/openclaw' and commit_ver <= ver_o:
+            status = '✅ instalado'
+        else:
+            status = '🔜 disponible'
+    else:
+        status = 'ℹ️ info'
+    # Extract feature noun (first word after feat: or after the version)
+    feat_match = re.search(r'feat:\s*(.+?)(\s\(|\s—|\sshipping|\sl[ie]gh|\son\s|$)', msg, re.I)
+    feature = feat_match.group(1)[:50] if feat_match else msg[:60]
+    # Suggest try-command for known features
+    try_hint = ''
+    low = msg.lower()
+    if 'dream' in low and 'synth' in low:
+        try_hint = '\`gbrain dream --phase synthesize --dry-run\`'
+    elif 'frontmatter' in low:
+        try_hint = '\`gbrain frontmatter audit\`'
+    elif 'compound' in low:
+        try_hint = '\`/gbrain compound dry-run\`'
+    elif 'voice' in low or 'voz' in low:
+        try_hint = 'no aplica — no tienes canal voz'
+    elif 'zoom' in low or 'meeting' in low:
+        try_hint = 'no aplica — no tienes integración zoom'
+    elif 'minion' in low or 'worker' in low:
+        try_hint = '\`gbrain jobs stats\`'
+    elif 'http' in low or 'oauth' in low:
+        try_hint = '\`/gbrain principles\` — wrapper afectado'
+    elif 'serve --http' in low:
+        try_hint = 'wrapper-related → check gbrain-http-wrapper'
+    print(f'| [{d[\"date\"]}] {feature.strip()} | {status} | {try_hint or \"info\"} |')
+    shown += 1
+" 2>/dev/null
+    echo ""
+  done
+
+  # ─── Layer 17b: Skill propagation (CENTRAL ORCHESTRATOR) ───
+  echo "### 🔗 Cambios que afectan skills relacionados"
+  echo ""
+  echo "_¿Qué mido?_ Si un cambio upstream afecta tus skills satélite (\`brain-write-macro\`, \`signal-detector\`, \`gbrain-http-wrapper\`), aquí aparece la sugerencia concreta. Este skill (\`/gbrain\`) es el **orquestador central** — el único que decide qué se actualiza y notifica los demás."
+  echo ""
+  PROPAG=()
+  # Check version vs known feature gates
+  if [ "$CURRENT_GBRAIN_VER" \> "0.22.6" ] 2>/dev/null; then
+    [ -d "$HOME/gbrain-http-wrapper" ] && PROPAG+=("⚙️ \`gbrain serve --http\` (v0.22.7+) ya existe upstream → wrapper local sigue corriendo pero ahora es **opcional** para clientes stdio-less. README ya documenta esto.")
+  fi
+  if [ "$CURRENT_GBRAIN_VER" \> "0.22.14" ] 2>/dev/null; then
+    PROPAG+=("📝 \`gbrain frontmatter generate --fix\` (v0.22.15+) auto-infiere frontmatter desde path → \`brain-write-macro\` puede simplificarse en futuro: ya no necesita validar tantos campos.")
+  fi
+  if [ "$CURRENT_GBRAIN_VER" \> "0.22.16" ] 2>/dev/null; then
+    PROPAG+=("🌙 \`gbrain dream\` ahora tiene 8 fases (synthesize + patterns añadidas en v0.23.0) → tu \`compound\` engine queda como **complemento post-dream**, no reemplazo. Sigue corriendo en cron 30 min después.")
+    PROPAG+=("📁 Corpus dir activado: \`~/.gbrain/corpus/openclaw-sessions/\` — converter \`tools/openclaw-to-corpus.py\` corre cada hora vía cron, alimenta synthesize automáticamente.")
+  fi
+  # Check for stale skills relative to monorepo
+  if [ -d "$HOME/skills/.git" ]; then
+    cd "$HOME/skills" 2>/dev/null && git fetch origin --quiet 2>/dev/null
+    LOCAL=$(git -C "$HOME/skills" rev-parse HEAD 2>/dev/null)
+    REMOTE=$(git -C "$HOME/skills" rev-parse origin/master 2>/dev/null)
+    [ "$LOCAL" != "$REMOTE" ] && PROPAG+=("⚠️ Monorepo \`durang/skills\` tiene cambios upstream sin pull — \`cd ~/skills && git pull\` para sincronizar Mac/EC2.")
+  fi
+  if [ ${#PROPAG[@]} -eq 0 ]; then
+    echo "_Cero propagaciones pendientes — todos los skills satélite alineados._"
+  else
+    for p in "${PROPAG[@]}"; do
+      echo "- $p"
+    done
+  fi
   echo ""
 
   # ─── Drift notification (NEW v2: silent push if NEW alert CATEGORY appears) ───
