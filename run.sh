@@ -838,6 +838,126 @@ PY
   echo "Failures / Total runs (últimas 24h): **$CRON_RATE**"
   echo ""
 
+  # ─── Layer 14b: System crontab jobs (audit declarado vs real) ───
+  echo "## 🗓️ Layer 14b — System crontab (canonical jobs declarados en MANIFEST)"
+  echo ""
+  echo "_¿Qué mido?_ Cruzo lo que está declarado en \`MANIFEST.json → system_crontab_jobs\` (la fuente canónica) contra lo que realmente está en \`crontab -l\` del sistema. Detecta si un job canónico falta, está duplicado, o tiene cadencia drift. Aplica también a jobs migrados de OpenClaw isolated-cron a system shell-cron (el patrón canónico recomendado por Garry en docs/guides/live-sync.md)."
+  echo ""
+  python3 <<'PY'
+import json, subprocess, re, os
+manifest_path = os.path.expanduser("~/.openclaw/skills/gbrain/MANIFEST.json")
+try:
+    mf = json.load(open(manifest_path))
+    # MANIFEST stores it under /components/system_crontab_jobs
+    declared = mf.get("components", {}).get("system_crontab_jobs", [])
+    if not declared:
+        declared = mf.get("contracts", {}).get("system_crontab_jobs", [])
+except Exception as e:
+    print(f"⚠️ MANIFEST.json no accesible: {e}")
+    declared = []
+
+# Read actual system crontab
+try:
+    actual = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5).stdout.splitlines()
+except Exception:
+    actual = []
+
+if not declared:
+    print("_(no `system_crontab_jobs` declarados en MANIFEST.json todavía)_")
+else:
+    print("| Job | Cadencia esperada | En crontab? | Última corrida (log) |")
+    print("|---|---|---|---|")
+    for job in declared:
+        name = job.get("name", "?")
+        sched = job.get("schedule", "?")
+        cmd = job.get("command", "")
+        # Use explicit match_pattern if provided, otherwise build from command
+        match_str = job.get("match_pattern", "")
+        if not match_str:
+            # Heuristic: find a unique 2-word signature in the command
+            # Prefer "<binary> <subcommand>" like "gbrain sync", "install.sh"
+            tokens = cmd.replace("&&", " ").split()
+            for i, tok in enumerate(tokens):
+                base = os.path.basename(tok.replace("$HOME", os.path.expanduser("~")))
+                # Find a binary-ish token followed by a subcommand
+                if base in ("gbrain", "openclaw", "hermes") and i + 1 < len(tokens) and not tokens[i+1].startswith("-"):
+                    match_str = f"{base} {tokens[i+1]}"
+                    break
+                if base.endswith(".sh") or base.endswith(".py"):
+                    match_str = base
+                    break
+            if not match_str and tokens:
+                match_str = tokens[0]
+        in_crontab = "❌ falta"
+        for line in actual:
+            stripped = line.strip()
+            if stripped.startswith("#") or not stripped:
+                continue
+            if match_str and match_str.replace("$HOME", os.path.expanduser("~")) in line.replace("$HOME", os.path.expanduser("~")):
+                # also check schedule matches
+                line_sched = " ".join(stripped.split()[:5])
+                if line_sched == sched:
+                    in_crontab = "✅"
+                else:
+                    in_crontab = f"⚠️ schedule drift (got `{line_sched}`)"
+                break
+        # Find latest log entry
+        log_info = "—"
+        for log_path_tpl in [
+            os.path.expanduser("~/.gbrain/logs/sync.log"),
+            os.path.expanduser("~/.gbrain/logs/skills-sync.log"),
+            os.path.expanduser("~/.gbrain/logs/compound.log"),
+            os.path.expanduser("~/.gbrain/logs/corpus-convert.log"),
+        ]:
+            base = os.path.basename(log_path_tpl).replace(".log","")
+            name_lower = name.lower()
+            if (base in name_lower or any(k in name_lower for k in base.split("-"))) and os.path.exists(log_path_tpl):
+                try:
+                    import datetime
+                    mt = os.path.getmtime(log_path_tpl)
+                    age_min = (datetime.datetime.now().timestamp() - mt) / 60
+                    if age_min < 60:
+                        log_info = f"hace {int(age_min)}m"
+                    elif age_min < 1440:
+                        log_info = f"hace {int(age_min/60)}h"
+                    else:
+                        log_info = f"hace {int(age_min/1440)}d"
+                except: pass
+                break
+        print(f"| **{name}** | `{sched}` | {in_crontab} | {log_info} |")
+    print()
+    # Check for orphan crontab entries (in actual but not declared)
+    declared_cmds = []
+    for job in declared:
+        for tok in job.get("command","").split():
+            if "/" in tok or tok.startswith("gbrain"):
+                declared_cmds.append(tok.replace("$HOME", os.path.expanduser("~")))
+                break
+    orphans = []
+    for line in actual:
+        stripped = line.strip()
+        if stripped.startswith("#") or not stripped:
+            continue
+        # Skip non-cron lines
+        parts = stripped.split()
+        if len(parts) < 6:
+            continue
+        # Check if this line matches any declared command
+        line_norm = stripped.replace("$HOME", os.path.expanduser("~"))
+        matched = any(c in line_norm for c in declared_cmds)
+        if not matched:
+            # Get a short summary of the orphan
+            cmd_part = " ".join(parts[5:])[:80]
+            orphans.append(cmd_part)
+    if orphans:
+        print(f"**Crontab orphans** (en sistema pero no declarados en MANIFEST):")
+        for o in orphans:
+            print(f"- ⚪ `{o}`")
+        print()
+        print("_Si algún orphan es canónico, agrégalo a `MANIFEST.json → system_crontab_jobs` para que Layer 14b lo trackee._")
+PY
+  echo ""
+
   # ─── Layer 15: Upstream changelog vs implementado ───
   echo "## 🚀 Layer 15 — Upstream changelog (commits + posts del autor)"
   echo ""
@@ -1209,6 +1329,117 @@ Run /gbrain en Telegram para detalle.")
   fi
   printf '%s\n' "${ALERTS[@]}" > "$ALERT_STATE_FILE"
 
+  # ─── Layer 18 — Clientes conectados al MCP gbrain + estado de custom-instructions ───
+  echo "## 🔌 Layer 18 — Clientes conectados al MCP gbrain (¿tienen las reglas v3?)"
+  echo ""
+  echo "_¿Qué mido?_ Cualquier cliente que se conecte al MCP gbrain SIN las reglas v3 (CHECK BEFORE WRITE + R1 conflict-flag + R2 source-tracking) es una bomba de duplicación. Aquí veo cuáles tienes y cuáles tienen las reglas cargadas."
+  echo ""
+  CI_VERSION=$(grep -oE "^custom-instructions-version: [0-9]+" "$HOME/.openclaw/skills/brain-write-macro/SKILL.md" 2>/dev/null | awk '{print $2}')
+  CI_APPLIED=$(cat "$HOME/.gbrain/custom-instructions-applied.flag" 2>/dev/null | tr -d ' \n')
+  [ -z "$CI_APPLIED" ] && CI_APPLIED="0"
+  WRAPPER_URL=$(cat "$HOME/.gbrain/wrapper.url" 2>/dev/null | head -1)
+  HOOK_INSTALLED=$([ -f "$HOME/.claude/settings.json" ] && grep -q "signal-detector" "$HOME/.claude/settings.json" 2>/dev/null && echo "yes" || echo "no")
+  HERMES_BWM=$([ -f "$HOME/.hermes/skills/openclaw-imports/brain-write-macro/SKILL.md" ] && grep -oE "^custom-instructions-version: [0-9]+" "$HOME/.hermes/skills/openclaw-imports/brain-write-macro/SKILL.md" 2>/dev/null | awk '{print $2}' || echo "n/a")
+  OC_SOUL=$([ -f "$HOME/SOUL.md" ] && grep -q "brain-write-macro\|gbrain__put_page" "$HOME/SOUL.md" 2>/dev/null && echo "yes" || echo "no")
+  echo "| Cliente | Conectado | Reglas v3 | Estado |"
+  echo "|---|---|---|---|"
+  echo "| **Claude Code CLI** (Stop hook signal-detector.py) | $([ "$HOOK_INSTALLED" = "yes" ] && echo "✅" || echo "❌") | $([ "$HOOK_INSTALLED" = "yes" ] && echo "skill v1.1 ✅" || echo "—") | $([ "$HOOK_INSTALLED" = "yes" ] && echo "fires per-turn, ambient capture" || echo "hook not registered in ~/.claude/settings.json") |"
+  echo "| **OpenClaw / Telegram** (SOUL.md instructions) | $([ "$OC_SOUL" = "yes" ] && echo "✅" || echo "❌") | $([ "$OC_SOUL" = "yes" ] && echo "via brain-write-macro v$CI_VERSION ✅" || echo "—") | $([ "$OC_SOUL" = "yes" ] && echo "model reads SOUL.md → calls gbrain__put_page" || echo "SOUL.md missing brain-write-macro reference") |"
+  echo "| **HERMES** (importado vía hermes claw migrate) | $([ "$HERMES_BWM" != "n/a" ] && echo "✅" || echo "❌") | $([ "$HERMES_BWM" = "$CI_VERSION" ] && echo "v$HERMES_BWM ✅" || echo "v$HERMES_BWM ⚠️ stale (run \`hermes claw migrate --overwrite\`)") | $([ "$HERMES_BWM" != "n/a" ] && echo "parallel runtime, importa skill" || echo "hermes no instalado o sin skills") |"
+  echo "| **Claude.ai web/app** (HTTP+OAuth connector) | $([ -n "$WRAPPER_URL" ] && echo "✅ $WRAPPER_URL" || echo "❌ wrapper URL desconocida") | $([ "$CI_APPLIED" = "$CI_VERSION" ] && echo "v$CI_APPLIED ✅" || echo "v$CI_APPLIED 🔴 OUT OF SYNC con spec v$CI_VERSION") | $([ "$CI_APPLIED" = "$CI_VERSION" ] && echo "custom instructions al día — paste in claude.ai → Profile" || echo "🚨 RIESGO: chatbot puede crear duplicados/meta-pages — corre \`/gbrain custom-instructions --adaptive\` y pega en claude.ai") |"
+  echo ""
+  if [ "$CI_APPLIED" != "$CI_VERSION" ]; then
+    echo "🔴 **Acción urgente:** las custom instructions de claude.ai están desactualizadas (v$CI_APPLIED vs v$CI_VERSION). Ejecuta:"
+    echo ""
+    echo "\`\`\`bash"
+    echo "/gbrain custom-instructions --adaptive   # genera snippet adaptado a TUS page/link types"
+    echo "# pega en claude.ai → Settings → Profile → Custom Instructions"
+    echo "echo $CI_VERSION > ~/.gbrain/custom-instructions-applied.flag"
+    echo "\`\`\`"
+    echo ""
+  fi
+
+  # ─── Layer 18b — Modelo activo + alineación cross-runtime (live read) ───
+  echo "## 🎛️ Layer 18b — Modelo activo en cada runtime (live, no cache)"
+  echo ""
+  echo "_¿Qué mido?_ Lee EN VIVO qué modelo está corriendo cada bot. Cuando cambias de modelo (algo que haces rápido), aquí ves si quedó alineado o si hay drift entre OpenClaw / Hermes / codex CLI. Cero hardcoding — todo viene de los config files actuales."
+  echo ""
+  # OpenClaw primary model + runtime
+  OC_PRIMARY=$(python3 -c "import json; cfg=json.load(open('$HOME/.openclaw/openclaw.json')); print(cfg['agents']['defaults']['model']['primary'])" 2>/dev/null || echo "?")
+  OC_FALLBACKS=$(python3 -c "import json; cfg=json.load(open('$HOME/.openclaw/openclaw.json')); print(','.join(cfg['agents']['defaults']['model']['fallbacks']))" 2>/dev/null || echo "?")
+  OC_RUNTIME=$(python3 -c "import json; cfg=json.load(open('$HOME/.openclaw/openclaw.json')); rt=cfg['agents']['defaults'].get('agentRuntime',{}); print(rt.get('id','default-pi') + ' (fallback=' + rt.get('fallback','-') + ')')" 2>/dev/null || echo "?")
+  OC_CODEX_PLUGIN=$(python3 -c "import json; cfg=json.load(open('$HOME/.openclaw/openclaw.json')); p=cfg.get('plugins',{}).get('entries',{}).get('codex',{}); print('enabled' if p.get('enabled') else 'disabled')" 2>/dev/null || echo "?")
+  # Hermes default model + provider
+  HM_DEFAULT=$(grep -E "^  default:" "$HOME/.hermes/config.yaml" 2>/dev/null | head -1 | awk '{print $2}' || echo "?")
+  HM_PROVIDER=$(awk '/^model:/{found=1; next} found && /^  provider:/{print $2; exit} /^[^ ]/{found=0}' "$HOME/.hermes/config.yaml" 2>/dev/null || echo "?")
+  HM_BASEURL=$(grep -E "^  base_url:" "$HOME/.hermes/config.yaml" 2>/dev/null | head -1 | awk '{print $2}' || echo "?")
+  # Codex CLI auth status (parse auth.json directly — más confiable que codex CLI subshell)
+  CODEX_AUTH_FILE=$([ -f "$HOME/.codex/auth.json" ] && echo "✅" || echo "❌")
+  CODEX_AUTH=$(python3 - <<'PY' 2>/dev/null
+import json, base64, os, datetime
+try:
+    p = os.path.expanduser("~/.codex/auth.json")
+    if not os.path.exists(p):
+        print("not installed"); raise SystemExit
+    data = json.load(open(p))
+    tok = data.get("tokens", {}).get("access_token", "")
+    if not tok:
+        print("auth.json present but no access_token"); raise SystemExit
+    parts = tok.split(".")
+    if len(parts) < 2:
+        print("malformed token"); raise SystemExit
+    pad = parts[1] + "=" * (-len(parts[1]) % 4)
+    claims = json.loads(base64.urlsafe_b64decode(pad).decode())
+    exp = claims.get("exp", 0)
+    now = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    plan = claims.get("https://api.openai.com/auth", {}).get("chatgpt_plan_type", "?")
+    if exp < now:
+        print(f"EXPIRED ({datetime.datetime.fromtimestamp(exp)}, plan={plan})")
+    else:
+        days_left = (exp - now) / 86400
+        print(f"Logged in using ChatGPT ({plan}, {days_left:.1f}d left)")
+except Exception as e:
+    print(f"check failed: {e}")
+PY
+)
+  [ -z "$CODEX_AUTH" ] && CODEX_AUTH="unknown"
+
+  # Alignment check: ¿OpenClaw + Hermes ambos usan codex? ¿el auth file está?
+  USES_CODEX_OC=$([[ "$OC_RUNTIME" == codex* ]] && echo "yes" || echo "no")
+  USES_CODEX_HM=$([[ "$HM_PROVIDER" == "openai-codex" ]] && echo "yes" || echo "no")
+  CODEX_LOGGED_IN=$([[ "$CODEX_AUTH" == *"Logged in"* ]] && echo "yes" || echo "no")
+
+  echo "| Runtime | Modelo activo | Auth/Provider | Status |"
+  echo "|---|---|---|---|"
+  echo "| **OpenClaw** (Jarvis) | \`$OC_PRIMARY\` → fallbacks: $OC_FALLBACKS | runtime: \`$OC_RUNTIME\`, codex plugin: $OC_CODEX_PLUGIN | $([ "$USES_CODEX_OC" = "yes" ] && [ "$CODEX_LOGGED_IN" = "yes" ] && echo "✅ aligned" || echo "⚠️ verificar") |"
+  echo "| **Hermes** (shermesbot) | \`$HM_DEFAULT\` | provider: \`$HM_PROVIDER\` → \`$HM_BASEURL\` | $([ "$USES_CODEX_HM" = "yes" ] && [ "$CODEX_LOGGED_IN" = "yes" ] && echo "✅ aligned" || echo "⚠️ verificar") |"
+  echo "| **Codex CLI nativo** | _bridge_ | auth.json: $CODEX_AUTH_FILE, status: $CODEX_AUTH | $([ "$CODEX_LOGGED_IN" = "yes" ] && echo "✅ Plus subscription" || echo "❌ NOT logged in") |"
+  echo ""
+
+  # Drift detection
+  DRIFT=""
+  if [ "$USES_CODEX_OC" = "yes" ] && [ "$CODEX_LOGGED_IN" != "yes" ]; then
+    DRIFT="${DRIFT}- 🔴 OpenClaw runtime=codex pero \`~/.codex/auth.json\` no está logueado → 401 al llamar OpenAI. Fix: \`codex login\` o reconstruir auth.json desde OpenClaw OAuth profile.\n"
+  fi
+  if [ "$USES_CODEX_HM" = "yes" ] && [ "$CODEX_LOGGED_IN" != "yes" ]; then
+    DRIFT="${DRIFT}- 🔴 Hermes provider=openai-codex pero codex CLI sin sesión → HTTP 400. Fix: igual que arriba.\n"
+  fi
+  if [[ "$OC_PRIMARY" != openai/* ]] && [ "$USES_CODEX_OC" = "yes" ]; then
+    DRIFT="${DRIFT}- 🔴 OpenClaw runtime=codex pero primary \`$OC_PRIMARY\` NO es openai/* — codex runtime rechaza otros providers (HTTP 400).\n"
+  fi
+  if [[ "$HM_DEFAULT" != openai/* ]] && [ "$USES_CODEX_HM" = "yes" ]; then
+    DRIFT="${DRIFT}- 🔴 Hermes provider=openai-codex pero default \`$HM_DEFAULT\` NO es openai/* — Codex rechaza con \"model not supported when using Codex with a ChatGPT account\".\n"
+  fi
+  if [ -n "$DRIFT" ]; then
+    echo "**Drift detectado:**"
+    printf -- "%b" "$DRIFT"
+  else
+    echo "✅ **Sin drift** — config alineado entre OpenClaw, Hermes y Codex CLI."
+  fi
+  echo ""
+  echo "_Cuando cambies de modelo: edita el config, restart, y vuelve a correr \`/gbrain check\`. Layer 18b lo refleja sin tocar este skill._"
+  echo ""
+
   # ─── Verdict + Quick actions ───
   echo "## 🎯 Veredicto + acciones"
   echo ""
@@ -1224,6 +1455,9 @@ Run /gbrain en Telegram para detalle.")
   echo "| Próxima acción | Comando |"
   echo "|---|---|"
   echo "| Auto-fix issues seguros + cleanup stuck | \`/gbrain fix\` |"
+  echo "| Generar custom instructions adaptadas a TU brain | \`/gbrain custom-instructions --adaptive\` |"
+  echo "| Auditar páginas mal-llenadas / duplicados / legacy slugs | \`/gbrain doctor\` |"
+  echo "| Ver estado de la integración con claude.ai | \`/gbrain integrate claude.ai\` |"
   echo "| Ver solo upstream news | \`/gbrain news\` |"
   echo "| Comparar vs snapshot anterior | \`/gbrain compare\` |"
   echo "| Guardar este reporte como \`.md\` | \`/gbrain save\` |"
@@ -1440,11 +1674,17 @@ case "$SUBCMD" in
     SKILL_VERSION=$(grep -oE "^custom-instructions-version: [0-9]+" "$HOME/.openclaw/skills/brain-write-macro/SKILL.md" 2>/dev/null | awk '{print $2}')
     APPLIED_VERSION=$(cat "$HOME/.gbrain/custom-instructions-applied.flag" 2>/dev/null | tr -d ' \n')
     [ -z "$APPLIED_VERSION" ] && APPLIED_VERSION="0"
+    ADAPTIVE_FLAG="${2:-}"
 
     echo "# /gbrain custom-instructions"
     echo ""
     echo "_Spec version (skill): **v$SKILL_VERSION**_"
     echo "_Applied version (your claude.ai): **v$APPLIED_VERSION**_"
+    if [ "$ADAPTIVE_FLAG" = "--adaptive" ]; then
+      echo "_Mode: **adaptive** — page/link types injected from your live brain_"
+    else
+      echo "_Mode: **static** — generic types. For brain-aware version run \`/gbrain custom-instructions --adaptive\`_"
+    fi
     echo ""
     if [ "$SKILL_VERSION" = "$APPLIED_VERSION" ]; then
       echo "✅ **In sync.** Your claude.ai snippet matches the canonical spec."
@@ -1454,15 +1694,25 @@ case "$SUBCMD" in
     echo ""
     echo "## Current state of your brain (auto-detected, dynamic)"
     echo ""
+    PAGE_TYPES_INJECT=""
+    LINK_TYPES_INJECT=""
     if [ -n "$DB_URL" ]; then
       echo "**Page types you have:**"
-      PGCONNECT_TIMEOUT=5 psql "$DB_URL" -At -c "SELECT type, COUNT(*) FROM pages GROUP BY type ORDER BY 2 DESC;" 2>/dev/null | head -10 | awk -F'|' '{printf "- `%s` (%s pages)\n", $1, $2}'
+      while IFS='|' read -r ptype pcount; do
+        [ -z "$ptype" ] && continue
+        echo "- \`$ptype\` ($pcount pages)"
+        PAGE_TYPES_INJECT="${PAGE_TYPES_INJECT}   - put_page slug:\"<namespace>/<...>\" type:\"$ptype\"\n"
+      done < <(PGCONNECT_TIMEOUT=5 psql "$DB_URL" -At -c "SELECT type, COUNT(*) FROM pages WHERE type IS NOT NULL GROUP BY type ORDER BY 2 DESC LIMIT 12;" 2>/dev/null)
       echo ""
       echo "**Link types you have:**"
-      PGCONNECT_TIMEOUT=5 psql "$DB_URL" -At -c "SELECT link_type, COUNT(*) FROM links WHERE link_type IS NOT NULL GROUP BY link_type ORDER BY 2 DESC;" 2>/dev/null | head -10 | awk -F'|' '{printf "- `%s` (%s links)\n", $1, $2}'
+      while IFS='|' read -r ltype lcount; do
+        [ -z "$ltype" ] && continue
+        echo "- \`$ltype\` ($lcount links)"
+        LINK_TYPES_INJECT="${LINK_TYPES_INJECT}   - type:\"$ltype\"\n"
+      done < <(PGCONNECT_TIMEOUT=5 psql "$DB_URL" -At -c "SELECT link_type, COUNT(*) FROM links WHERE link_type IS NOT NULL GROUP BY link_type ORDER BY 2 DESC LIMIT 15;" 2>/dev/null)
     fi
     echo ""
-    echo "## Canonical snippet (current — copy this into claude.ai)"
+    echo "## Canonical snippet v$SKILL_VERSION (current — copy this into claude.ai)"
     echo ""
     echo "\`\`\`"
     cat <<'EOF'
@@ -1487,7 +1737,7 @@ PROCEDURE:
 2. SLUG RULES:
    - Always kebab-case, lowercase, ASCII only (NO accents): sergio-duran, NOT sergio-durán.
    - Format: people/firstname-lastname, companies/name, decisions/short-summary,
-     originals/short-kebab.
+     originals/short-kebab, projects/<name>, concepts/<topic>, recipes/<name>.
 
 3. CHECK BEFORE WRITE (avoid duplicates):
    - Before each gbrain__put_page, call gbrain__get_page with fuzzy:true on the slug.
@@ -1495,11 +1745,32 @@ PROCEDURE:
      with the merged content (existing + new attributes from this conversation).
    - If not found, write fresh.
 
-4. WRITE PAGES with required frontmatter:
+3.5. R1 CONFLICT FLAG (NO silent overwrite):
+   - If a field in the existing page (status, role, company, location, dates, amounts)
+     CONTRADICTS the new value from this conversation, do NOT overwrite. Append:
+     ## Posible contradiccion (YYYY-MM-DD)
+     - Field: <name>
+     - Valor anterior: <old>
+     - Valor nuevo: <new>
+     - Source: claude.ai web session
+     - Accion: verificar con Sergio
+   - Mark this slug as (conflict-flagged) in the confirm output, not (enriched).
+
+4. WRITE PAGES with required frontmatter (one of these types):
    - put_page slug:"people/<...>" type:"person" title:"<Full Name>"
    - put_page slug:"companies/<...>" type:"company" title:"<Company Name>"
    - put_page slug:"decisions/<...>" type:"decision" title:"<one-line summary>"
    - put_page slug:"originals/<...>" type:"original" title:"<short header>"
+   - put_page slug:"projects/<...>" type:"project" title:"<Project Name>"
+   - put_page slug:"concepts/<...>" type:"concept" title:"<Concept Header>"
+   - put_page slug:"recipes/<...>" type:"recipe" title:"<Recipe Header>"
+
+4.5. R2 SOURCE TRACKING — every put_page includes provenance frontmatter:
+   sources:
+     - date: <today YYYY-MM-DD>
+       channel: claude-ai-web
+       session_id: <opaque short id from this conversation>
+   If sources already exists in the page, APPEND not REPLACE.
 
 5. CREATE LINKS for cross-references with gbrain__add_link:
    - Person works at Company → from:"people/x" to:"companies/y" type:"works_at"
@@ -1507,29 +1778,57 @@ PROCEDURE:
    - Fund invested in Company → type:"invested_in"
    - Person met with Person → type:"met_with"
    - Person advised Person → type:"advised"
+   - Person collaborates with Person → type:"collaborates_with"
+   - Company owns Company → type:"owns"
+   - Person/Company subject_of Decision/Project → type:"subject_of"
+   - Page mentioned_in Source → type:"mentioned_in"
+   - Page A superseded_by Page B → type:"superseded_by"
+   - Person negotiating with Person/Company → type:"negotiating"
+   - Person advises Company → type:"advises"
 
 6. CONFIRM with the actual slugs you wrote AFTER all tool calls succeed:
 
-   ✅ Guardado en gbrain:
+   Guardado en gbrain:
    - people/mike-shapiro (new)
-   - people/jason-X (enriched)
+   - people/jason-prescott (enriched)
+   - people/sarah-chen (conflict-flagged: status "advisor" vs "investor")
    - companies/elafris (new)
    - decisions/proposed-pool-split-33-30-30-10 (new)
    - originals/insurance-vertical-thesis (new)
-   - 4 links: mike→elafris (founded), mike→digital-kozak (founded), ...
+   - 4 links: mike->elafris (founded), mike->digital-kozak (founded), ...
 
-CRITICAL RULES:
+CRITICAL RULES (anti-hallucination):
 - NEVER respond "guardado" / "saved" / "listo" / "done" without listing actual slugs you
   called put_page on. That is hallucination.
-- NEVER ask "qué quieres que guarde?" / "what should I save?". Infer from the conversation.
+- NEVER ask "que quieres que guarde?" / "what should I save?". Infer from the conversation.
   Better to write 8 pages and let me prune than to write 0 and ask.
+- NEVER write meta-content as if it were the entity. A page people/jason-prescott whose
+  body is "User initiated export request..." is wrong. If you don't have substantive
+  attributes about the entity, do not write the page.
+- NEVER overwrite a contradicting field silently. Always flag with the contradiction block.
 - If a put_page or add_link call returns an error, report it explicitly:
-  "❌ Failed: people/mike-shapiro — error: <message>". Do not pretend it worked.
+  "Failed: people/mike-shapiro - error: <message>". Do not pretend it worked.
 - For "originals" (my ideas), preserve my exact phrasing in compiled_truth, not paraphrase.
 - One reply at the end with the slug list. No commentary mid-process.
 EOF
     echo "\`\`\`"
     echo ""
+    if [ "$ADAPTIVE_FLAG" = "--adaptive" ] && [ -n "$DB_URL" ]; then
+      echo "## Adaptive injection — your brain's actual page/link types"
+      echo ""
+      echo "Append these to the snippet's PROCEDURE section if missing (Step 4 = page types, Step 5 = link types):"
+      echo ""
+      echo "**Step 4 additions (page types in your brain not listed above):**"
+      echo "\`\`\`"
+      printf -- "%b" "$PAGE_TYPES_INJECT"
+      echo "\`\`\`"
+      echo ""
+      echo "**Step 5 additions (link types in your brain):**"
+      echo "\`\`\`"
+      printf -- "%b" "$LINK_TYPES_INJECT"
+      echo "\`\`\`"
+      echo ""
+    fi
     echo "## How to update"
     echo ""
     echo "1. Copy the snippet above"
@@ -1538,5 +1837,103 @@ EOF
     echo "4. Save in claude.ai"
     echo "5. On EC2: \`echo $SKILL_VERSION > ~/.gbrain/custom-instructions-applied.flag\`"
     ;;
-  *) echo "Unknown subcommand: $SUBCMD"; echo "Use: check | fix | news | bugs | compare | save | bootstrap | principles | manifest | custom-instructions"; exit 1 ;;
+  doctor)
+    DB_URL=$(python3 -c "import json; print(json.load(open('$HOME/.gbrain/config.json'))['database_url'])" 2>/dev/null)
+    [ -z "$DB_URL" ] && { echo "❌ No \$HOME/.gbrain/config.json — gbrain not initialized"; exit 1; }
+    echo "# /gbrain doctor — canonical-shape audit"
+    echo ""
+    echo "Detects: meta-content pages, namespace duplicates, legacy \`brain/\` slugs, contradiction blocks, stale namespaces, type singular/plural inconsistency."
+    echo ""
+    echo "## 1. Meta-content pages (body describes the conversation, not the entity)"
+    echo ""
+    PGCONNECT_TIMEOUT=5 psql "$DB_URL" -At -c "
+      SELECT slug FROM pages
+      WHERE compiled_truth ILIKE 'User initiated%'
+         OR compiled_truth ILIKE 'User asked%'
+         OR compiled_truth ILIKE 'Contact referenced in user%'
+         OR compiled_truth ILIKE 'User initiated export%'
+      LIMIT 30;
+    " 2>/dev/null | awk 'NF{print "- ⚠️  `" $0 "`"}'
+    echo ""
+    echo "## 2. Namespace duplicates (same entity in flat + canonical namespaces)"
+    echo ""
+    PGCONNECT_TIMEOUT=5 psql "$DB_URL" -At -c "
+      WITH normalized AS (
+        SELECT slug,
+               regexp_replace(lower(slug), '^(brain/|people/|companies/|projects/|jpc-|jason-)', '') AS norm
+        FROM pages
+      )
+      SELECT norm, array_agg(slug) FROM normalized
+      GROUP BY norm HAVING COUNT(*) > 1
+      ORDER BY COUNT(*) DESC LIMIT 20;
+    " 2>/dev/null | awk -F'|' 'NF{print "- `" $1 "` →", $2}'
+    echo ""
+    echo "## 3. Legacy \`brain/\` namespace pages (pre-0.18 migration leftovers)"
+    echo ""
+    PGCONNECT_TIMEOUT=5 psql "$DB_URL" -At -c "SELECT slug FROM pages WHERE slug LIKE 'brain/%' LIMIT 20;" 2>/dev/null | awk 'NF{print "- `" $0 "`"}'
+    echo ""
+    echo "## 4. Pages with active contradiction blocks (need user resolution)"
+    echo ""
+    PGCONNECT_TIMEOUT=5 psql "$DB_URL" -At -c "SELECT slug FROM pages WHERE compiled_truth LIKE '%Posible contradicci%n%' LIMIT 20;" 2>/dev/null | awk 'NF{print "- ⚠️  `" $0 "` → resolve and remove the block once verified"}'
+    echo ""
+    echo "## 5. Pages without sources frontmatter (R2 not yet applied)"
+    echo ""
+    PGCONNECT_TIMEOUT=5 psql "$DB_URL" -At -c "SELECT COUNT(*) FROM pages WHERE compiled_truth NOT LIKE '%sources:%' AND updated_at > now() - interval '7 days';" 2>/dev/null | awk 'NF{print "- " $0 " pages updated in last 7d without sources tracking"}'
+    echo ""
+    echo "## 6. Page type inconsistency — singular vs plural (canon: singular)"
+    echo ""
+    echo "_The canon per gbrain docs and brain-write-macro v3 is singular: person, company, decision, original, project, concept, recipe. If you have both forms, choose one and migrate._"
+    echo ""
+    PGCONNECT_TIMEOUT=5 psql "$DB_URL" -At -c "
+      WITH norm AS (
+        SELECT type, COUNT(*) AS n,
+               regexp_replace(type, 's\$', '') AS singular
+        FROM pages WHERE type IS NOT NULL GROUP BY type
+      )
+      SELECT singular, array_agg(type || ' (' || n || ')') FROM norm
+      GROUP BY singular HAVING COUNT(*) > 1 ORDER BY singular;
+    " 2>/dev/null | awk -F'|' 'NF{print "- ⚠️  `" $1 "` →", $2}'
+    echo ""
+    echo "## Suggested actions"
+    echo "- For meta-content pages → \`gbrain delete-page <slug>\` (after confirming with /gbrain principles entry)"
+    echo "- For namespace duplicates → soft-rename via \`add_link type:\"superseded_by\"\` from old to canonical, then content stub"
+    echo "- For legacy \`brain/\` slugs → consolidate into canonical namespace"
+    echo "- For contradictions → read the block, resolve manually, edit the page"
+    ;;
+  integrate)
+    CLIENT="${2:-}"
+    case "$CLIENT" in
+      claude.ai|claudeai|claude-ai)
+        echo "# /gbrain integrate claude.ai"
+        echo ""
+        WRAPPER_URL=$(grep -oE "https://[^[:space:]]*" "$HOME/.gbrain/wrapper.url" 2>/dev/null | head -1)
+        OAUTH_OK=$([ -f "$HOME/.gbrain/oauth.json" ] && echo "yes" || echo "no")
+        CI_VERSION=$(grep -oE "^custom-instructions-version: [0-9]+" "$HOME/.openclaw/skills/brain-write-macro/SKILL.md" 2>/dev/null | awk '{print $2}')
+        APPLIED=$(cat "$HOME/.gbrain/custom-instructions-applied.flag" 2>/dev/null | tr -d ' \n')
+        [ -z "$APPLIED" ] && APPLIED="0"
+        echo "| Component | Status |"
+        echo "|---|---|"
+        echo "| HTTP+OAuth wrapper | $([ -n "$WRAPPER_URL" ] && echo "✅ $WRAPPER_URL" || echo "❌ no wrapper.url file")  |"
+        echo "| OAuth registered (DCR) | $([ "$OAUTH_OK" = "yes" ] && echo "✅" || echo "⚠️ check manually at claude.ai → Connectors")  |"
+        echo "| Custom instructions spec | v$CI_VERSION |"
+        echo "| Custom instructions applied | v$APPLIED $([ "$APPLIED" = "$CI_VERSION" ] && echo "✅ in sync" || echo "🔴 OUT OF SYNC")  |"
+        echo ""
+        echo "Next steps:"
+        [ "$APPLIED" != "$CI_VERSION" ] && echo "- Run \`/gbrain custom-instructions --adaptive\` and paste the snippet into claude.ai → Settings → Profile"
+        [ -z "$WRAPPER_URL" ] && echo "- Wrapper URL missing — start \`gbrain-http-wrapper\` and write its public URL to \$HOME/.gbrain/wrapper.url"
+        echo "- Verify connector: in claude.ai web, click any chat → Connectors → confirm \`gbrain\` is listed and tools count > 0"
+        ;;
+      ""|help)
+        echo "Usage: /gbrain integrate <client>"
+        echo ""
+        echo "Supported clients:"
+        echo "  claude.ai    HTTP+OAuth wrapper status, custom-instructions sync, connector check"
+        ;;
+      *)
+        echo "❌ Unknown client: $CLIENT"
+        echo "Supported: claude.ai"
+        ;;
+    esac
+    ;;
+  *) echo "Unknown subcommand: $SUBCMD"; echo "Use: check | fix | news | bugs | compare | save | bootstrap | principles | manifest | custom-instructions [--adaptive] | doctor | integrate <client> | compound"; exit 1 ;;
 esac

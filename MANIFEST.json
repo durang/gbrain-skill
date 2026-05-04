@@ -112,10 +112,19 @@
       }
     ],
     "cron_jobs": [
-      { "id": "616d2c20-d06d-4116-830b-2b097b6fe819", "name": "GBrain Sync", "expected_schedule": "*/15 * * * *" },
+      { "id": "616d2c20-d06d-4116-830b-2b097b6fe819", "name": "GBrain Sync", "expected_schedule": "DEPRECATED — use system crontab", "deprecated": true, "replaced_by": "system_crontab", "replaced_on": "2026-05-03", "replacement_command": "*/15 * * * * gbrain sync --repo $HOME/brain && gbrain embed --stale >> $HOME/.gbrain/logs/sync.log 2>&1", "deprecation_reason": "Agent-isolated cron took ~5min/run with 1GB RAM (saturated EC2). Canonical pattern per gbrain docs/guides/live-sync.md is direct shell command (~0.5s/run, <100MB). 670x faster, same cadence." },
       { "id": "363ae2bf-a065-4b50-9033-1397c77ae93b", "name": "GBrain Weekly Doctor", "expected_schedule": "0 9 * * 0" },
       { "id": "009487c5-bfa8-4fb0-965b-0d59beb4a8a7", "name": "GBrain Daily Report", "expected_schedule": "0 20 * * *" },
       { "id": "a6896cd4-069f-4447-ab67-7a74434f7b6f", "name": "GBrain Dream", "expected_schedule": "0 3 * * *" }
+    ],
+    "system_crontab_jobs": [
+      { "name": "GBrain Sync (canonical)", "schedule": "*/15 * * * *", "command": "gbrain sync --repo $HOME/brain && gbrain embed --stale", "match_pattern": "gbrain sync --repo", "since": "2026-05-03", "rationale": "Replaces deprecated openclaw isolated-agent cron. Source: gbrain docs/guides/live-sync.md (Approach 1)." },
+      { "name": "Skills monorepo sync", "schedule": "30 * * * *", "command": "cd $HOME/skills && git pull -q && bash install.sh", "match_pattern": "skills && git pull", "rationale": "Pulls skill updates from durang/skills repo." },
+      { "name": "Compound engine", "schedule": "30 10 * * *", "command": "bash $HOME/.openclaw/skills/gbrain/compound/run.sh run", "match_pattern": "compound/run.sh", "rationale": "7th-phase post-dream consolidation." },
+      { "name": "Compound morning report", "schedule": "0 15 * * *", "command": "bash $HOME/.openclaw/skills/gbrain/compound/morning-report.sh", "match_pattern": "compound/morning-report.sh", "rationale": "Daily summary of compound cycle." },
+      { "name": "OpenClaw sessions to corpus", "schedule": "0 * * * *", "command": "python3 $HOME/.openclaw/skills/gbrain/tools/openclaw-to-corpus.py", "match_pattern": "openclaw-to-corpus.py", "rationale": "Converts agent session jsonl to .txt corpus that gbrain dream synthesize reads." },
+      { "name": "GBrain daily report (16:00 UTC)", "schedule": "0 16 * * *", "command": "$HOME/.openclaw/skills/gbrain/run.sh save", "match_pattern": "gbrain/run.sh save", "rationale": "Saves /gbrain check report to ~/brain/reports/ daily." },
+      { "name": "Canonical config backup (16:30 UTC)", "schedule": "30 16 * * *", "command": "mkdir -p ~/backups/canon && cp ~/.openclaw/openclaw.json ~/backups/canon/openclaw-$(date +%Y%m%d).json && cp ~/SOUL.md ~/backups/canon/SOUL-$(date +%Y%m%d).md && cp ~/MEMORY.md ~/backups/canon/MEMORY-$(date +%Y%m%d).md", "match_pattern": "backups/canon", "rationale": "Daily snapshot of canonical config files (openclaw.json, SOUL.md, MEMORY.md)." }
     ],
     "schema_contracts": {
       "description": "Required postgres tables and columns. Used by /gbrain Layer 3b for drift detection.",
