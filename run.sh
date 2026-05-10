@@ -1836,6 +1836,56 @@ EOF
     echo "3. Replace the existing block with the new one"
     echo "4. Save in claude.ai"
     echo "5. On EC2: \`echo $SKILL_VERSION > ~/.gbrain/custom-instructions-applied.flag\`"
+echo ""
+    echo "---"
+    echo ""
+    echo "## 🌐 Wrapper clients detected"
+    echo ""
+    WRAPPER_HEALTH=$(curl -s http://127.0.0.1:8787/health 2>/dev/null)
+    if [ -n "$WRAPPER_HEALTH" ]; then
+      echo "✅ Wrapper running on :8787"
+      echo ""
+      echo "| Client | Connection | Custom Instructions |"
+      echo "|--------|-----------|-------------------|"
+      echo "| Claude Code CLI | stdio directo | No necesita (skills+hooks) |"
+      echo "| Hermes Agent | stdio directo | No necesita (SOUL.md) |"
+      echo "| OpenClaw/Telegram | stdio directo | No necesita (SOUL.md) |"
+      echo "| Claude.ai web | HTTP wrapper OAuth | Snippet Claude arriba |"
+      echo "| ChatGPT App | HTTP wrapper OAuth | Snippet ChatGPT abajo |"
+      echo "| Codex CLI Mac | HTTP wrapper Bearer | Snippet ChatGPT abajo |"
+    else
+      echo "❌ Wrapper NOT running"
+    fi
+    echo ""
+    echo "---"
+    echo ""
+    echo "## 📋 Snippet para ChatGPT (con BUSCA PRIMERO)"
+    echo ""
+    echo '```'
+    echo 'RULE: When I say "busca en gbrain", "search gbrain" — ALWAYS call GBrain MCP'
+    echo 'tools (search, get_page) FIRST. Never answer from memory alone.'
+    echo ''
+    echo 'On "guarda en gbrain", "save to gbrain", "mete al brain":'
+    echo 'SCAN for: people, companies, decisions, original ideas.'
+    echo 'SLUGS: kebab-case, lowercase, ASCII.'
+    echo 'CHECK BEFORE WRITE. CONFLICT FLAG. SOURCE: chatgpt-app. APPEND.'
+    echo 'CONFIRM with slug list. Never say guardado without list.'
+    echo '```'
+    echo ""
+    echo "---"
+    echo ""
+    echo "## 🔄 Opción bidireccional (auto-save)"
+    echo ""
+    echo "Agrega este bloque ADICIONAL para auto-guardar sin pedirlo:"
+    echo ""
+    echo '```'
+    echo 'BIDIRECTIONAL: After every substantive conversation, automatically save'
+    echo 'decisions, people, companies, ideas to GBrain. No greetings/trivial.'
+    echo 'Do it silently. This is additional to manual triggers.'
+    echo '```'
+    echo ""
+    echo "**Normal (default):** guarda cuando dices 'guarda en gbrain'"
+    echo "**Bidireccional:** agrega el bloque — guarda todo importante automáticamente"
     ;;
   doctor)
     DB_URL=$(python3 -c "import json; print(json.load(open('$HOME/.gbrain/config.json'))['database_url'])" 2>/dev/null)
